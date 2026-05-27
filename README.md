@@ -1,36 +1,140 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# UbiLaundry REST API Caller
 
-## Getting Started
+A browser-based tool for calling UbiLaundry REST APIs — bulk imports, data feeds, environment management and ID conversion tables. Built with Next.js 16 and deployable via Docker.
 
-First, run the development server:
+---
+
+## Features
+
+| Feature | Description |
+|---|---|
+| **API Explorer** | Browse and call any UbiLaundry endpoint from the home page |
+| **Bulk Assignment Import** | Upload a CSV/Excel file and send one API call per row (assignment endpoint) |
+| **Bulk Data Feeder** | Upload a CSV/Excel file and POST each row to any endpoint |
+| **Environments** | Store multiple base-URL + credential sets and switch between them |
+| **Conversion Tables** | Translate IDs from one environment to another before sending |
+
+---
+
+## Deployment
+
+### Docker (recommended)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone https://github.com/aliubisolutions/ubilaundry-rest-api-caller.git
+cd ubilaundry-rest-api-caller
+docker-compose up -d
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The app is available at **http://localhost:3000**.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Updating to a new version
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+git pull
+docker-compose build
+docker-compose up -d
+```
 
-## Learn More
+The version number is shown in the top bar of every page. Use it to confirm you are running the latest build.
 
-To learn more about Next.js, take a look at the following resources:
+### Local development
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm install
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Pages
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Home — API Explorer (`/`)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Call individual API endpoints. Select a group and endpoint, fill in the path parameters and request body, then click **Send**. The response (status, headers, body) is shown below.
+
+Configuration (base URL, username, password) is stored in the browser's `localStorage`. Use the **Environments** page to manage multiple configurations.
+
+→ [Detailed documentation](docs/api-explorer.md)
+
+---
+
+### Bulk Assignment Import (`/import`)
+
+Upload a CSV or Excel file where each row represents an item to assign. The page:
+
+1. Parses column headers as field names
+2. Builds the correct `{ item: { ... }, reassign, returnValue }` payload for each row
+3. Optionally applies **Conversion Tables** to translate IDs from a source environment
+4. Shows a **Preview Payloads** panel before sending
+5. Sends requests in parallel (3 workers) and displays only error rows after completion
+
+→ [Detailed documentation](docs/bulk-import.md)
+
+---
+
+### Bulk Data Feeder (`/feed`)
+
+Same upload flow as the import page, but targets any POST endpoint instead of the fixed assignment endpoint. Column headers become JSON field names; use dot notation (e.g. `category.id`) for nested fields. Fixed fields can be injected into every row.
+
+→ [Detailed documentation](docs/bulk-feed.md)
+
+---
+
+### Environments (`/environments`)
+
+Store named environments (base URL + credentials). Each environment can be:
+
+- **Tested** — calls `/api/getServerTime` to verify connectivity
+- **Activated** — writes the credentials to `localStorage` so all pages use them
+
+→ [Detailed documentation](docs/environments.md)
+
+---
+
+### Conversion Tables (`/conversions`)
+
+Map IDs from a source environment to a target environment. Used by the import and feed pages to translate foreign-key values (locations, categories, etc.) before sending.
+
+→ [Detailed documentation](docs/conversion-tables.md)
+
+---
+
+## Architecture
+
+```
+src/
+  app/
+    page.tsx              # Home / API Explorer
+    import/page.tsx       # Bulk Assignment Import
+    feed/page.tsx         # Bulk Data Feeder
+    environments/page.tsx # Environment manager
+    conversions/page.tsx  # Conversion table editor
+    api/proxy/route.ts    # Server-side proxy (avoids CORS)
+  lib/
+    endpoints.ts          # Endpoint catalogue
+    storage.ts            # localStorage helpers + conversion logic
+    version.ts            # APP_VERSION constant
+  components/
+    ConfigBar.tsx         # Top bar shown on the home page
+```
+
+All configuration (environments, conversion tables, active credentials) is persisted in the browser's `localStorage`. No database is required.
+
+The `/api/proxy` server route forwards requests to the UbiLaundry server so that CORS restrictions do not apply.
+
+---
+
+## Version history
+
+| Version | Changes |
+|---|---|
+| 1.7.1 | Inline rename for conversion tables |
+| 1.7.0 | Results tables show error rows only (performance) |
+| 1.6.0 | Conversion table fallback strategies (error / default / keep-source) |
+| 1.5.0 | Payload preview panel before sending |
+| 1.4.0 | Conversion tables and ID translation |
+| 1.3.0 | Environments page |
+| 1.2.0 | Bulk Data Feeder page |
+| 1.1.0 | Bulk Assignment Import page |
+| 1.0.0 | Initial release — API Explorer |
