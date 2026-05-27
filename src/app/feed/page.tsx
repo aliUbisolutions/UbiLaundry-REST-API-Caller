@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, Fragment } from 'react';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
@@ -27,7 +27,10 @@ interface RowResult {
   status: RowStatus;
   httpStatus?: number;
   message?: string;
-  notes?: string;   // substitution details (default / keep-source applied)
+  notes?: string;
+  payload?: Record<string, unknown>;
+  responseBody?: unknown;
+  elapsed?: number;
 }
 
 // ─── JSON building ───────────────────────────────────────────────────────────
@@ -145,6 +148,9 @@ export default function FeedPage() {
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
   const [previewRow, setPreviewRow] = useState<string>('');
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewIdx, setPreviewIdx] = useState(0);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const abortRef = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -162,6 +168,21 @@ export default function FeedPage() {
 
   const toggleTable = (id: string) =>
     setSelectedTableIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
+  const previewPayloads = useMemo(() =>
+    rows.map(row => {
+      const raw = rowToJson(row, fixedFields);
+      if (!useConversion || selectedTableIds.length === 0) return { payload: raw, errors: [] as string[], notes: [] as string[] };
+      const tables = allTables.filter(t => selectedTableIds.includes(t.id));
+      const { converted, errors, notes } = applyConversions(raw, tables);
+      return {
+        payload: converted as Record<string, unknown>,
+        errors,
+        notes: notes.map(n => `${n.fieldPath}: ${n.sourceId} ${n.detail}`),
+      };
+    }),
+    [rows, fixedFields, useConversion, selectedTableIds, allTables]
+  );
 
   const endpoint: Endpoint | undefined = useMemo(
     () => POST_ENDPOINTS.find(e => e.id === selectedId),
@@ -234,7 +255,7 @@ export default function FeedPage() {
 
   const reset = () => {
     setRows([]); setResults([]); setFileName(''); setParseError('');
-    setDone(false); setPreviewRow('');
+    setDone(false); setPreviewRow(''); setShowPreview(false); setExpandedIdx(null);
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -242,9 +263,11 @@ export default function FeedPage() {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (!endpoint || rows.length === 0) return;
 
+    setShowPreview(false);
     abortRef.current = false;
     setRunning(true);
     setDone(false);
+    setExpandedIdx(null);
 
     const initial: RowResult[] = rows.map((row, i) => ({
       index: i,
@@ -254,13 +277,8 @@ export default function FeedPage() {
     setResults(initial);
 
     const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    };
-    if (config.username) {
-      headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
-    }
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     const update = (i: number, patch: Partial<RowResult>) =>
       setResults(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
@@ -273,40 +291,34 @@ export default function FeedPage() {
         if (abortRef.current) { update(idx, { status: 'error', message: 'Cancelled' }); continue; }
         update(idx, { status: 'running' });
         try {
-          const rawJson = rowToJson(rows[idx], fixedFields);
+          const { payload: finalJson, errors: convErrors, notes: convNotes } = previewPayloads[idx];
 
-          // Apply ID conversions if enabled
-          let finalJson = rawJson;
-          let substitutionNotes = '';
-          if (useConversion && selectedTableIds.length > 0) {
-            const tables = allTables.filter(t => selectedTableIds.includes(t.id));
-            const { converted, errors, notes } = applyConversions(rawJson, tables);
-            if (errors.length > 0) {
-              update(idx, { status: 'error', message: errors.join(' | ') });
-              continue;
-            }
-            finalJson = converted;
-            const subs = notes.filter(n => n.action === 'default' || n.action === 'kept-source');
-            if (subs.length > 0) {
-              substitutionNotes = subs.map(n => `${n.fieldPath}: ${n.detail}`).join('; ');
-            }
+          if (convErrors.length > 0) {
+            update(idx, { status: 'error', message: convErrors.join(' | '), payload: finalJson });
+            continue;
           }
 
-          const body = JSON.stringify(finalJson);
+          const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
+
+          const t0 = Date.now();
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body }),
+            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson) }),
           });
           const data = await res.json();
+          const elapsed = Date.now() - t0;
           if (data.error) {
-            update(idx, { status: 'error', message: data.error });
+            update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
             const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
-            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined });
+            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
           } else {
-            const msg = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
-            update(idx, { status: 'error', httpStatus: data.status, message: msg.slice(0, 150) });
+            const body = data.body;
+            const msg = body && typeof body === 'object'
+              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
+              : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
@@ -561,7 +573,18 @@ export default function FeedPage() {
 
             {/* Step 5 — Run */}
             {rows.length > 0 && results.length === 0 && (
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => { setPreviewIdx(0); setShowPreview(true); }}
+                  disabled={!config.baseUrl}
+                  className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                  Preview payloads
+                </button>
                 <button
                   onClick={runFeed}
                   disabled={running || !config.baseUrl}
@@ -620,29 +643,63 @@ export default function FeedPage() {
                     </thead>
                     <tbody>
                       {results.map((r) => (
-                        <tr key={r.index} className="border-b border-slate-700/30 hover:bg-slate-700/20">
-                          <td className="px-4 py-2 text-slate-600">{r.index + 1}</td>
-                          <td className="px-4 py-2">
-                            <div className="flex items-center gap-1.5">
-                              {STATUS_ICON[r.status]}
-                              <span className={
-                                r.status === 'ok'             ? 'text-emerald-400' :
-                                r.status === 'ok-substituted' ? 'text-yellow-400' :
-                                r.status === 'error'          ? 'text-red-400' :
-                                r.status === 'running'        ? 'text-blue-400' : 'text-slate-600'
-                              }>
-                                {(r.status === 'ok' || r.status === 'ok-substituted') && r.httpStatus
-                                  ? `${r.status === 'ok-substituted' ? 'ok*' : 'ok'} (${r.httpStatus})`
-                                  : r.status}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[200px]">{r.rowPreview}</td>
-                          <td className="px-4 py-2 truncate max-w-[280px]">
-                            {r.message && <span className="text-slate-500">{r.message}</span>}
-                            {r.notes   && <span className="text-yellow-600 text-xs">{r.notes}</span>}
-                          </td>
-                        </tr>
+                        <Fragment key={r.index}>
+                          <tr
+                            onClick={() => setExpandedIdx(prev => prev === r.index ? null : r.index)}
+                            className="border-b border-slate-700/30 cursor-pointer hover:bg-slate-700/30 transition-colors"
+                          >
+                            <td className="px-4 py-2 text-slate-600">{r.index + 1}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center gap-1.5">
+                                {STATUS_ICON[r.status]}
+                                <span className={
+                                  r.status === 'ok'             ? 'text-emerald-400' :
+                                  r.status === 'ok-substituted' ? 'text-yellow-400' :
+                                  r.status === 'error'          ? 'text-red-400' :
+                                  r.status === 'running'        ? 'text-blue-400' : 'text-slate-600'
+                                }>
+                                  {(r.status === 'ok' || r.status === 'ok-substituted') && r.httpStatus
+                                    ? `${r.status === 'ok-substituted' ? 'ok*' : 'ok'} (${r.httpStatus})${r.elapsed ? ` · ${r.elapsed}ms` : ''}`
+                                    : r.status}{r.status === 'error' && r.httpStatus ? ` (${r.httpStatus})` : ''}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[200px]">{r.rowPreview}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="truncate max-w-xs">
+                                  {r.message && <span className="text-slate-500">{r.message}</span>}
+                                  {r.notes   && <span className="text-yellow-600 text-xs">{r.notes}</span>}
+                                </span>
+                                <span className="text-slate-600 shrink-0">{expandedIdx === r.index ? '▲' : '▼'}</span>
+                              </div>
+                            </td>
+                          </tr>
+                          {expandedIdx === r.index && (
+                            <tr className="bg-slate-950 border-b border-slate-700">
+                              <td colSpan={4} className="px-4 py-4">
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div>
+                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload sent</p>
+                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                      {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
+                                    </pre>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
+                                      Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
+                                    </p>
+                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                      {r.responseBody !== undefined && r.responseBody !== null
+                                        ? JSON.stringify(r.responseBody, null, 2)
+                                        : r.message ?? '—'}
+                                    </pre>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>
@@ -652,6 +709,71 @@ export default function FeedPage() {
           </>
         )}
       </div>
+
+      {/* Payload preview panel */}
+      {showPreview && endpoint && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex">
+          <div className="flex-1" onClick={() => setShowPreview(false)} />
+          <div className="w-full max-w-3xl bg-slate-900 border-l border-slate-700 flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700 shrink-0">
+              <div>
+                <h2 className="text-white font-semibold">Payload Preview</h2>
+                <p className="text-slate-400 text-xs mt-0.5 font-mono truncate max-w-sm">
+                  POST → {endpoint.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={runFeed} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors">
+                  Send {rows.length} rows
+                </button>
+                <button onClick={() => setShowPreview(false)} className="text-slate-400 hover:text-white p-1.5 rounded">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-1 min-h-0">
+              <div className="w-56 shrink-0 border-r border-slate-700 overflow-y-auto">
+                {rows.map((row, i) => {
+                  const { errors } = previewPayloads[i];
+                  const label = String(Object.values(row)[0] ?? `row ${i + 1}`).slice(0, 24);
+                  return (
+                    <button key={i} onClick={() => setPreviewIdx(i)}
+                      className={`w-full text-left px-3 py-2.5 text-xs border-b border-slate-800 transition-colors
+                        ${previewIdx === i ? 'bg-slate-700 text-white' : errors.length > 0 ? 'text-red-400 hover:bg-slate-800' : 'text-slate-400 hover:bg-slate-800'}`}>
+                      <span className="text-slate-600 mr-1.5">#{i + 1}</span>
+                      <span className="font-mono">{label}</span>
+                      {errors.length > 0 && <span className="ml-1 text-red-500">⚠</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex-1 overflow-auto p-4">
+                {previewPayloads[previewIdx] && (
+                  <>
+                    {previewPayloads[previewIdx].errors.length > 0 && (
+                      <div className="mb-3 p-3 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400">
+                        <p className="font-semibold mb-1">Conversion errors — this row will be skipped:</p>
+                        {previewPayloads[previewIdx].errors.map((e, ei) => <p key={ei}>{e}</p>)}
+                      </div>
+                    )}
+                    {previewPayloads[previewIdx].notes.length > 0 && (
+                      <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-300">
+                        <p className="font-semibold mb-1">Conversion applied:</p>
+                        {previewPayloads[previewIdx].notes.map((n, ni) => <p key={ni} className="font-mono">{n}</p>)}
+                      </div>
+                    )}
+                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
+                      {JSON.stringify(previewPayloads[previewIdx].payload, null, 2)}
+                    </pre>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
