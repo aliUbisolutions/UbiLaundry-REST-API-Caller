@@ -44,6 +44,9 @@ export default function ConversionsPage() {
   const [form, setForm] = useState({ name: '', sourceEnvId: '', targetEnvId: '' });
   const [formPaths, setFormPaths] = useState<string[]>(['']);
 
+  // Inline name editing
+  const [editingName, setEditingName] = useState<string | null>(null);
+
   // ID loading for mapping editor
   const [entityType, setEntityType]   = useState('Location');
   const [sourceIds, setSourceIds]     = useState<IdOption[]>([]);
@@ -146,6 +149,17 @@ export default function ConversionsPage() {
 
   const envName = (id: string) => envs.find(e => e.id === id)?.name ?? id;
 
+  const commitName = () => {
+    if (!selected || editingName === null) return;
+    const trimmed = editingName.trim();
+    if (trimmed && trimmed !== selected.name) {
+      const updated = { ...selected, name: trimmed };
+      persist(tables.map(t => t.id === selected.id ? updated : t));
+      setSelected(updated);
+    }
+    setEditingName(null);
+  };
+
   // Group tables by source→target pair
   const grouped = tables.reduce<Record<string, ConversionTable[]>>((acc, t) => {
     const key = `${t.sourceEnvId}__${t.targetEnvId}`;
@@ -216,7 +230,7 @@ export default function ConversionsPage() {
                       {pairTables.map(t => (
                         <button
                           key={t.id}
-                          onClick={() => { setSelected(t); setSourceIds([]); setTargetIds([]); setLoadError(''); }}
+                          onClick={() => { setSelected(t); setSourceIds([]); setTargetIds([]); setLoadError(''); setEditingName(null); }}
                           className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
                             selected?.id === t.id
                               ? 'bg-slate-700 border-slate-600'
@@ -247,7 +261,26 @@ export default function ConversionsPage() {
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div className="min-w-0">
-                  <h2 className="text-white text-lg font-semibold">{selected.name}</h2>
+                  {editingName !== null ? (
+                    <input
+                      autoFocus
+                      value={editingName}
+                      onChange={e => setEditingName(e.target.value)}
+                      onBlur={commitName}
+                      onKeyDown={e => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditingName(null); }}
+                      className="text-white text-lg font-semibold bg-slate-700 border border-blue-500 rounded px-2 py-0.5 focus:outline-none w-full max-w-sm"
+                    />
+                  ) : (
+                    <button
+                      onClick={() => setEditingName(selected.name)}
+                      className="group flex items-center gap-1.5 text-white text-lg font-semibold hover:text-blue-300 transition-colors"
+                    >
+                      {selected.name}
+                      <svg className="w-3.5 h-3.5 text-slate-600 group-hover:text-blue-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2.414a2 2 0 01.586-1.414z" />
+                      </svg>
+                    </button>
+                  )}
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-blue-300">{envName(selected.sourceEnvId)}</span>
                     {' → '}
