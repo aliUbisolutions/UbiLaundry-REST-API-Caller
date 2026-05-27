@@ -49,7 +49,7 @@ export default function Sidebar({ selected, onSelect }: Props) {
   const isExpanded = (key: string) => key in expanded ? expanded[key] : true;
 
   return (
-    <div className="flex flex-col h-full bg-slate-900 border-r border-slate-700">
+    <div className="flex flex-col flex-1 min-h-0 bg-slate-900 border-r border-slate-700">
       <div className="p-3 border-b border-slate-700">
         <div className="relative">
           <svg className="absolute left-2.5 top-2 w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
