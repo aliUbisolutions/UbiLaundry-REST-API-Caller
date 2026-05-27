@@ -35,7 +35,16 @@ export default function Home() {
       <div className="flex flex-1 min-h-0">
         <div className="w-72 shrink-0 flex flex-col min-h-0">
           <Sidebar selected={selectedId} onSelect={setSelectedId} />
-          <div className="p-3 border-t border-slate-700">
+          <div className="p-3 border-t border-slate-700 space-y-1">
+            <Link
+              href="/feed"
+              className="flex items-center gap-2 w-full px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Bulk Data Feeder
+            </Link>
             <Link
               href="/import"
               className="flex items-center gap-2 w-full px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
