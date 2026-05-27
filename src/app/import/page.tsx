@@ -513,98 +513,87 @@ export default function ImportPage() {
             {/* Results */}
             {results.length > 0 && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg overflow-hidden">
+                {/* Progress header */}
                 <div className="px-4 py-3 border-b border-slate-700">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-4 text-xs">
-                      <span className="text-emerald-400">{counts.ok ?? 0} ok</span>
-                      <span className="text-red-400">{counts.error ?? 0} error</span>
-                      <span className="text-slate-500">{counts.skipped ?? 0} skipped</span>
-                      <span className="text-slate-400">{counts.pending ?? 0} pending</span>
+                      <span className="text-emerald-400 font-medium">{counts.ok ?? 0} ok</span>
+                      {(counts.error ?? 0) > 0 && <span className="text-red-400 font-medium">{counts.error} error</span>}
+                      {(counts.skipped ?? 0) > 0 && <span className="text-slate-500">{counts.skipped} skipped</span>}
+                      {(counts.pending ?? 0) > 0 && <span className="text-slate-500">{counts.pending} pending</span>}
                     </div>
                     <div className="flex items-center gap-2">
-                      {running && (
-                        <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded">Stop</button>
-                      )}
-                      {done && (
-                        <button onClick={reset} className="text-xs text-slate-400 hover:text-white px-3 py-1 border border-slate-600 rounded">New import</button>
-                      )}
+                      {running && <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded">Stop</button>}
+                      {done && <button onClick={reset} className="text-xs text-slate-400 hover:text-white px-3 py-1 border border-slate-600 rounded">New import</button>}
                     </div>
                   </div>
                   <div className="w-full bg-slate-700 rounded-full h-1.5">
                     <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
                       style={{ width: `${rows.length > 0 ? (processed / rows.length) * 100 : 0}%` }} />
                   </div>
-                  <p className="text-xs text-slate-500 mt-1">{processed} / {rows.length} — click any row to see request / response</p>
+                  <p className="text-xs text-slate-500 mt-1">{processed} / {rows.length}</p>
                 </div>
 
-                <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-slate-800 z-10">
-                      <tr className="border-b border-slate-700">
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium w-8">#</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Status</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">ID</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Message</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {results.map((r, i) => (
-                        <Fragment key={i}>
-                          <tr
-                            onClick={() => toggleExpand(i)}
-                            className="border-b border-slate-700/30 cursor-pointer hover:bg-slate-700/30 transition-colors"
-                          >
-                            <td className="px-4 py-2 text-slate-600">{i + 1}</td>
-                            <td className="px-4 py-2">
-                              <div className="flex items-center gap-1.5">
-                                {STATUS_ICON[r.status]}
-                                <span className={
-                                  r.status === 'ok'      ? 'text-emerald-400' :
-                                  r.status === 'error'   ? 'text-red-400' :
-                                  r.status === 'running' ? 'text-blue-400' :
-                                  r.status === 'skipped' ? 'text-slate-500' : 'text-slate-600'
-                                }>
-                                  {r.status}{r.httpStatus ? ` (${r.httpStatus})` : ''}{r.elapsed ? ` · ${r.elapsed}ms` : ''}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="px-4 py-2 font-mono text-slate-300">{String(r.row.id)}</td>
-                            <td className="px-4 py-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-slate-500 truncate max-w-xs">{r.message ?? ''}</span>
-                                <span className="text-slate-600 shrink-0">{expandedIdx === i ? '▲' : '▼'}</span>
-                              </div>
-                            </td>
-                          </tr>
-                          {expandedIdx === i && (
-                            <tr className="bg-slate-950 border-b border-slate-700">
-                              <td colSpan={4} className="px-4 py-4">
-                                <div className="grid grid-cols-2 gap-4">
-                                  <div>
-                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload sent</p>
-                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
-                                      {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
-                                    </pre>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
-                                      Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
-                                    </p>
-                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
-                                      {r.responseBody !== undefined && r.responseBody !== null
-                                        ? JSON.stringify(r.responseBody, null, 2)
-                                        : r.message ?? '—'}
-                                    </pre>
-                                  </div>
+                {/* Errors only */}
+                {results.some(r => r.status === 'error') && (
+                  <div className="overflow-y-auto max-h-[460px]">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-slate-800 z-10">
+                        <tr className="border-b border-slate-700">
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium w-10">#</th>
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium">ID</th>
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium">Error</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {results.map((r, i) => r.status !== 'error' ? null : (
+                          <Fragment key={i}>
+                            <tr onClick={() => toggleExpand(i)}
+                              className="border-b border-slate-700/30 cursor-pointer hover:bg-red-900/10 transition-colors">
+                              <td className="px-4 py-2 text-slate-500">{i + 1}</td>
+                              <td className="px-4 py-2 font-mono text-slate-300 max-w-[180px] truncate">{String(r.row.id ?? '')}</td>
+                              <td className="px-4 py-2">
+                                <div className="flex items-center gap-2">
+                                  {r.httpStatus && <span className="text-slate-500 shrink-0">HTTP {r.httpStatus}</span>}
+                                  <span className="text-red-400 truncate">{r.message ?? ''}</span>
+                                  <span className="text-slate-600 shrink-0 ml-auto">{expandedIdx === i ? '▲' : '▼'}</span>
                                 </div>
                               </td>
                             </tr>
-                          )}
-                        </Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                            {expandedIdx === i && (
+                              <tr className="bg-slate-950 border-b border-slate-700">
+                                <td colSpan={3} className="px-4 py-4">
+                                  <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                      <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload</p>
+                                      <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-64 overflow-y-auto leading-relaxed">
+                                        {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
+                                      </pre>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
+                                        Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
+                                      </p>
+                                      <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-64 overflow-y-auto leading-relaxed">
+                                        {r.responseBody != null ? JSON.stringify(r.responseBody, null, 2) : r.message ?? '—'}
+                                      </pre>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {done && !(results.some(r => r.status === 'error')) && (
+                  <div className="px-4 py-6 text-center">
+                    <p className="text-emerald-400 text-sm font-medium">All {counts.ok ?? 0} rows imported successfully.</p>
+                  </div>
+                )}
               </div>
             )}
           </>
