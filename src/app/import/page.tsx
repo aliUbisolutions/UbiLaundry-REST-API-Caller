@@ -1,15 +1,15 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo, Fragment } from 'react';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
+import {
+  loadEnvironments, loadConversionTables, applyConversions,
+  type Environment, type ConversionTable, type ConversionNote,
+} from '@/lib/storage';
 
-interface Config {
-  baseUrl: string;
-  username: string;
-  password: string;
-}
+interface Config { baseUrl: string; username: string; password: string; }
 
 interface Row {
   id: string;
@@ -30,9 +30,10 @@ interface RowResult {
   status: RowStatus;
   httpStatus?: number;
   message?: string;
+  payload?: Record<string, unknown>;
+  responseBody?: unknown;
+  elapsed?: number;
 }
-
-const REQUIRED_COL = 'id';
 
 function parseDate(val: unknown): string | null {
   if (!val || val === 'NULL') return null;
@@ -49,33 +50,25 @@ function toInt(val: unknown): number | null {
   return isNaN(n) ? null : n;
 }
 
-function buildPayload(row: Row, reassign: boolean, returnValue: boolean) {
+function buildPayload(row: Row, reassign: boolean, returnValue: boolean): Record<string, unknown> {
   const item: Record<string, unknown> = {
     '@class': 'net.ubisolutions.ubimanager.entities.laundry.ItemLaundry',
     id: String(row.id).trim(),
     attributeLinks: [],
   };
-
   const encodingDate = parseDate(row.encodingDate);
   if (encodingDate) item.encodingDate = encodingDate;
-
   const firstSeenDate = parseDate(row.firstSeenDate);
   if (firstSeenDate) item.firstSeenDate = firstSeenDate;
-
   const lastSeenDate = parseDate(row.lastSeenDate);
   if (lastSeenDate) item.lastSeenDate = lastSeenDate;
-
   const categoryId = toInt(row.category);
   if (categoryId !== null) item.category = { id: categoryId };
-
   const locationId = toInt(row.lastSeenLocation);
   if (locationId !== null) item.lastSeenLocation = { id: locationId };
-
   if (row.comment && row.comment !== 'NULL') item.comment = row.comment;
-
   const killed = toInt(row.killed);
   if (killed !== null) item.killed = killed === 1;
-
   return { item, reassign, returnValue };
 }
 
@@ -87,11 +80,7 @@ function parseFile(file: File): Promise<Row[]> {
         const data = e.target?.result;
         const wb = XLSX.read(data, { type: 'binary', raw: false, cellDates: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
-          defval: '',
-          raw: false,
-        });
-        // Drop the leading row-number column (first unnamed column)
+        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
         const rows = raw.map((r) => {
           const cleaned: Record<string, unknown> = {};
           for (const [k, v] of Object.entries(r)) {
@@ -101,9 +90,7 @@ function parseFile(file: File): Promise<Row[]> {
           return cleaned as Row;
         }).filter((r) => r.id && String(r.id).trim() !== '');
         resolve(rows);
-      } catch (err) {
-        reject(err);
-      }
+      } catch (err) { reject(err); }
     };
     reader.onerror = reject;
     reader.readAsBinaryString(file);
@@ -139,19 +126,54 @@ export default function ImportPage() {
   const [config] = useState<Config>(() => {
     try { return JSON.parse(localStorage.getItem('ubilaundry-config') ?? '{}'); } catch { return {}; }
   });
+  const [envs] = useState<Environment[]>(() => loadEnvironments());
+  const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
-  const [rows, setRows] = useState<Row[]>([]);
-  const [results, setResults] = useState<RowResult[]>([]);
-  const [running, setRunning] = useState(false);
-  const [done, setDone] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const [fileName, setFileName] = useState('');
+  const [rows, setRows]           = useState<Row[]>([]);
+  const [results, setResults]     = useState<RowResult[]>([]);
+  const [running, setRunning]     = useState(false);
+  const [done, setDone]           = useState(false);
+  const [dragging, setDragging]   = useState(false);
+  const [fileName, setFileName]   = useState('');
   const [parseError, setParseError] = useState('');
-  const [reassign, setReassign] = useState(true);
+  const [reassign, setReassign]   = useState(true);
   const [returnValue, setReturnValue] = useState(true);
-  const [concurrency] = useState(3);
+  const [concurrency]             = useState(3);
+
+  const [sourceEnvId, setSourceEnvId]             = useState('');
+  const [selectedTableIds, setSelectedTableIds]   = useState<Set<string>>(new Set());
+
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewIdx, setPreviewIdx]   = useState(0);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+
   const abortRef = useRef(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const fileRef  = useRef<HTMLInputElement>(null);
+
+  const targetEnv = useMemo(() =>
+    envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
+    [envs, config.baseUrl]
+  );
+
+  const applicableTables = useMemo(() => {
+    if (!sourceEnvId || !targetEnv) return [] as ConversionTable[];
+    return allTables.filter(t => t.sourceEnvId === sourceEnvId && t.targetEnvId === targetEnv.id);
+  }, [allTables, sourceEnvId, targetEnv]);
+
+  const activeTables = useMemo(() =>
+    applicableTables.filter(t => selectedTableIds.has(t.id)),
+    [applicableTables, selectedTableIds]
+  );
+
+  const previewPayloads = useMemo(() =>
+    rows.map(r => {
+      const raw = buildPayload(r, reassign, returnValue);
+      if (activeTables.length === 0) return { payload: raw, errors: [] as string[], notes: [] as ConversionNote[] };
+      const result = applyConversions(raw, activeTables);
+      return { payload: result.converted as Record<string, unknown>, errors: result.errors, notes: result.notes };
+    }),
+    [rows, reassign, returnValue, activeTables]
+  );
 
   const loadFile = useCallback(async (file: File) => {
     setParseError('');
@@ -186,90 +208,79 @@ export default function ImportPage() {
   const runImport = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (rows.length === 0) return;
-
+    setShowPreview(false);
     abortRef.current = false;
     setRunning(true);
     setDone(false);
+    setExpandedIdx(null);
 
     const initial: RowResult[] = rows.map((row) => ({ row, status: 'pending' }));
     setResults(initial);
 
     const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
-    if (config.username) {
-      headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
-    }
+    const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     const update = (index: number, patch: Partial<RowResult>) =>
       setResults((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
 
-    // Process rows with limited concurrency
     let cursor = 0;
     const total = rows.length;
 
     const processOne = async (index: number) => {
-      if (abortRef.current) {
-        update(index, { status: 'skipped', message: 'Cancelled' });
-        return;
-      }
+      if (abortRef.current) { update(index, { status: 'skipped', message: 'Cancelled' }); return; }
       const row = rows[index];
-      if (!row.id || String(row.id).trim() === '') {
-        update(index, { status: 'skipped', message: 'Missing id' });
+      if (!row.id || String(row.id).trim() === '') { update(index, { status: 'skipped', message: 'Missing id' }); return; }
+      update(index, { status: 'running' });
+
+      const { payload, errors: convErrors } = previewPayloads[index];
+
+      if (convErrors.length > 0) {
+        update(index, { status: 'error', message: convErrors.join('; '), payload });
         return;
       }
-      update(index, { status: 'running' });
+
       try {
-        const payload = buildPayload(row, reassign, returnValue);
+        const t0 = Date.now();
         const res = await fetch('/api/proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(payload) }),
+          body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
         });
         const data = await res.json();
+        const elapsed = Date.now() - t0;
         if (data.error) {
-          update(index, { status: 'error', message: data.error });
+          update(index, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
         } else if (data.status >= 200 && data.status < 300) {
-          update(index, { status: 'ok', httpStatus: data.status });
+          update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
         } else {
-          const msg = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
-          update(index, { status: 'error', httpStatus: data.status, message: msg.slice(0, 120) });
+          const body = data.body;
+          const msg = body && typeof body === 'object'
+            ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
+            : String(body ?? '');
+          update(index, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
         }
       } catch (err: unknown) {
-        update(index, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
+        update(index, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
       }
     };
 
-    // Worker loop
-    const worker = async () => {
-      while (true) {
-        const idx = cursor++;
-        if (idx >= total) break;
-        await processOne(idx);
-      }
-    };
-
-    const workers = Array.from({ length: Math.min(concurrency, total) }, () => worker());
-    await Promise.all(workers);
-
+    const worker = async () => { while (true) { const idx = cursor++; if (idx >= total) break; await processOne(idx); } };
+    await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
     setRunning(false);
     setDone(true);
   };
 
-  const stop = () => { abortRef.current = true; };
-
+  const stop  = () => { abortRef.current = true; };
   const reset = () => {
-    setRows([]);
-    setResults([]);
-    setFileName('');
-    setParseError('');
-    setDone(false);
+    setRows([]); setResults([]); setFileName(''); setParseError('');
+    setDone(false); setShowPreview(false); setExpandedIdx(null);
     if (fileRef.current) fileRef.current.value = '';
   };
 
-  const counts = results.reduce(
-    (acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; },
-    {} as Record<RowStatus, number>
-  );
+  const toggleExpand = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
+
+  const counts    = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);
   const processed = (counts.ok ?? 0) + (counts.error ?? 0) + (counts.skipped ?? 0);
 
   return (
@@ -285,11 +296,9 @@ export default function ImportPage() {
         <div className="w-px h-4 bg-slate-700" />
         <h1 className="text-white font-semibold text-sm">Bulk Assignment Import</h1>
         <div className="flex-1" />
-        {config.baseUrl ? (
-          <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>
-        ) : (
-          <span className="text-xs text-yellow-500">Base URL not configured</span>
-        )}
+        {config.baseUrl
+          ? <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>
+          : <span className="text-xs text-yellow-500">Base URL not configured</span>}
       </div>
 
       <div className="max-w-5xl mx-auto px-5 py-8 space-y-6">
@@ -313,10 +322,7 @@ export default function ImportPage() {
                 <p className="text-white font-medium">{fileName}</p>
                 <p className="text-slate-400 text-sm">{rows.length} rows ready to import</p>
               </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); reset(); }}
-                className="ml-4 text-slate-500 hover:text-red-400 transition-colors"
-              >
+              <button onClick={(e) => { e.stopPropagation(); reset(); }} className="ml-4 text-slate-500 hover:text-red-400 transition-colors">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
@@ -336,7 +342,7 @@ export default function ImportPage() {
 
         {rows.length > 0 && (
           <>
-            {/* Options */}
+            {/* Import options */}
             <div className="bg-slate-800 border border-slate-700 rounded-lg px-5 py-4">
               <h2 className="text-sm font-semibold text-slate-300 mb-3">Import Options</h2>
               <div className="flex flex-wrap gap-6">
@@ -353,11 +359,56 @@ export default function ImportPage() {
               </div>
             </div>
 
-            {/* Preview table */}
+            {/* ID Conversion */}
+            {envs.length > 0 && (
+              <div className="bg-slate-800 border border-slate-700 rounded-lg px-5 py-4">
+                <h2 className="text-sm font-semibold text-slate-300 mb-3">ID Conversion</h2>
+                <div className="flex items-center gap-3 mb-3 flex-wrap">
+                  <label className="text-xs text-slate-400 shrink-0">Source environment</label>
+                  <select
+                    value={sourceEnvId}
+                    onChange={e => { setSourceEnvId(e.target.value); setSelectedTableIds(new Set()); }}
+                    className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">None (no conversion)</option>
+                    {envs.filter(e => !targetEnv || e.id !== targetEnv.id).map(e => (
+                      <option key={e.id} value={e.id}>{e.name}</option>
+                    ))}
+                  </select>
+                  {targetEnv && sourceEnvId && <span className="text-xs text-slate-500">→ {targetEnv.name}</span>}
+                  {!targetEnv && sourceEnvId && <span className="text-xs text-yellow-500">Active URL not matched to a saved environment</span>}
+                </div>
+                {sourceEnvId && applicableTables.length === 0 && (
+                  <p className="text-xs text-slate-500">No conversion tables defined for this pair.</p>
+                )}
+                {applicableTables.length > 0 && (
+                  <div className="space-y-1.5">
+                    {applicableTables.map(t => (
+                      <label key={t.id} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedTableIds.has(t.id)}
+                          onChange={e => setSelectedTableIds(prev => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(t.id); else next.delete(t.id);
+                            return next;
+                          })}
+                          className="accent-blue-500 w-3.5 h-3.5"
+                        />
+                        <span className="text-xs text-slate-300">{t.name}</span>
+                        <span className="text-xs text-slate-500">{t.fieldPaths.join(', ')}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Raw data preview table */}
             {results.length === 0 && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg overflow-hidden">
                 <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-                  <h2 className="text-sm font-semibold text-slate-300">Preview (first 5 rows)</h2>
+                  <h2 className="text-sm font-semibold text-slate-300">Data Preview (first 5 rows)</h2>
                   <span className="text-xs text-slate-500">{rows.length} total rows</span>
                 </div>
                 <div className="overflow-x-auto">
@@ -385,9 +436,20 @@ export default function ImportPage() {
               </div>
             )}
 
-            {/* Action button */}
+            {/* Action buttons */}
             {results.length === 0 && (
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => { setPreviewIdx(0); setShowPreview(true); }}
+                  disabled={!config.baseUrl}
+                  className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                  Preview payloads
+                </button>
                 <button
                   onClick={runImport}
                   disabled={running || !config.baseUrl}
@@ -401,10 +463,9 @@ export default function ImportPage() {
               </div>
             )}
 
-            {/* Progress + Results */}
+            {/* Results */}
             {results.length > 0 && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg overflow-hidden">
-                {/* Progress header */}
                 <div className="px-4 py-3 border-b border-slate-700">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-4 text-xs">
@@ -415,59 +476,84 @@ export default function ImportPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {running && (
-                        <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 transition-colors px-3 py-1 border border-red-400/30 rounded">
-                          Stop
-                        </button>
+                        <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded">Stop</button>
                       )}
                       {done && (
-                        <button onClick={reset} className="text-xs text-slate-400 hover:text-white transition-colors px-3 py-1 border border-slate-600 rounded">
-                          New import
-                        </button>
+                        <button onClick={reset} className="text-xs text-slate-400 hover:text-white px-3 py-1 border border-slate-600 rounded">New import</button>
                       )}
                     </div>
                   </div>
                   <div className="w-full bg-slate-700 rounded-full h-1.5">
-                    <div
-                      className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
-                      style={{ width: `${rows.length > 0 ? (processed / rows.length) * 100 : 0}%` }}
-                    />
+                    <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                      style={{ width: `${rows.length > 0 ? (processed / rows.length) * 100 : 0}%` }} />
                   </div>
-                  <p className="text-xs text-slate-500 mt-1">{processed} / {rows.length}</p>
+                  <p className="text-xs text-slate-500 mt-1">{processed} / {rows.length} — click any row to see request / response</p>
                 </div>
 
-                {/* Results table */}
-                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+                <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
                   <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-slate-800">
+                    <thead className="sticky top-0 bg-slate-800 z-10">
                       <tr className="border-b border-slate-700">
                         <th className="text-left px-4 py-2 text-slate-400 font-medium w-8">#</th>
                         <th className="text-left px-4 py-2 text-slate-400 font-medium">Status</th>
                         <th className="text-left px-4 py-2 text-slate-400 font-medium">ID</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Category</th>
                         <th className="text-left px-4 py-2 text-slate-400 font-medium">Message</th>
                       </tr>
                     </thead>
                     <tbody>
                       {results.map((r, i) => (
-                        <tr key={i} className="border-b border-slate-700/30 hover:bg-slate-700/20">
-                          <td className="px-4 py-2 text-slate-600">{i + 1}</td>
-                          <td className="px-4 py-2">
-                            <div className="flex items-center gap-1.5">
-                              {STATUS_ICON[r.status]}
-                              <span className={
-                                r.status === 'ok' ? 'text-emerald-400' :
-                                r.status === 'error' ? 'text-red-400' :
-                                r.status === 'running' ? 'text-blue-400' :
-                                r.status === 'skipped' ? 'text-slate-500' : 'text-slate-600'
-                              }>
-                                {r.status === 'ok' && r.httpStatus ? `${r.status} (${r.httpStatus})` : r.status}
-                              </span>
-                            </div>
-                          </td>
-                          <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[200px]">{String(r.row.id)}</td>
-                          <td className="px-4 py-2 text-slate-400">{String(r.row.category ?? '')}</td>
-                          <td className="px-4 py-2 text-slate-500 truncate max-w-[240px]">{r.message ?? ''}</td>
-                        </tr>
+                        <Fragment key={i}>
+                          <tr
+                            onClick={() => toggleExpand(i)}
+                            className="border-b border-slate-700/30 cursor-pointer hover:bg-slate-700/30 transition-colors"
+                          >
+                            <td className="px-4 py-2 text-slate-600">{i + 1}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center gap-1.5">
+                                {STATUS_ICON[r.status]}
+                                <span className={
+                                  r.status === 'ok'      ? 'text-emerald-400' :
+                                  r.status === 'error'   ? 'text-red-400' :
+                                  r.status === 'running' ? 'text-blue-400' :
+                                  r.status === 'skipped' ? 'text-slate-500' : 'text-slate-600'
+                                }>
+                                  {r.status}{r.httpStatus ? ` (${r.httpStatus})` : ''}{r.elapsed ? ` · ${r.elapsed}ms` : ''}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 font-mono text-slate-300">{String(r.row.id)}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-slate-500 truncate max-w-xs">{r.message ?? ''}</span>
+                                <span className="text-slate-600 shrink-0">{expandedIdx === i ? '▲' : '▼'}</span>
+                              </div>
+                            </td>
+                          </tr>
+                          {expandedIdx === i && (
+                            <tr className="bg-slate-950 border-b border-slate-700">
+                              <td colSpan={4} className="px-4 py-4">
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div>
+                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload sent</p>
+                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                      {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
+                                    </pre>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
+                                      Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
+                                    </p>
+                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                      {r.responseBody !== undefined && r.responseBody !== null
+                                        ? JSON.stringify(r.responseBody, null, 2)
+                                        : r.message ?? '—'}
+                                    </pre>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>
@@ -477,6 +563,74 @@ export default function ImportPage() {
           </>
         )}
       </div>
+
+      {/* Payload preview panel */}
+      {showPreview && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex">
+          <div className="flex-1" onClick={() => setShowPreview(false)} />
+          <div className="w-full max-w-3xl bg-slate-900 border-l border-slate-700 flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700 shrink-0">
+              <div>
+                <h2 className="text-white font-semibold">Payload Preview</h2>
+                <p className="text-slate-400 text-xs mt-0.5 font-mono">
+                  POST → {config.baseUrl?.replace(/\/$/, '')}/api/assignment
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={runImport} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors">
+                  Import {rows.length} items
+                </button>
+                <button onClick={() => setShowPreview(false)} className="text-slate-400 hover:text-white p-1.5 rounded">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-1 min-h-0">
+              {/* Row list */}
+              <div className="w-56 shrink-0 border-r border-slate-700 overflow-y-auto">
+                {rows.map((r, i) => {
+                  const { errors } = previewPayloads[i];
+                  return (
+                    <button key={i} onClick={() => setPreviewIdx(i)}
+                      className={`w-full text-left px-3 py-2.5 text-xs border-b border-slate-800 transition-colors
+                        ${previewIdx === i ? 'bg-slate-700 text-white' : errors.length > 0 ? 'text-red-400 hover:bg-slate-800' : 'text-slate-400 hover:bg-slate-800'}`}>
+                      <span className="text-slate-600 mr-1.5">#{i + 1}</span>
+                      <span className="font-mono">{String(r.id).slice(0, 24)}</span>
+                      {errors.length > 0 && <span className="ml-1 text-red-500">⚠</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Payload JSON */}
+              <div className="flex-1 overflow-auto p-4">
+                {previewPayloads[previewIdx] && (
+                  <>
+                    {previewPayloads[previewIdx].errors.length > 0 && (
+                      <div className="mb-3 p-3 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400">
+                        <p className="font-semibold mb-1">Conversion errors — this row will be skipped:</p>
+                        {previewPayloads[previewIdx].errors.map((e, ei) => <p key={ei}>{e}</p>)}
+                      </div>
+                    )}
+                    {previewPayloads[previewIdx].notes.length > 0 && (
+                      <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-300">
+                        <p className="font-semibold mb-1">Conversion applied:</p>
+                        {previewPayloads[previewIdx].notes.map((n, ni) => (
+                          <p key={ni} className="font-mono">{n.fieldPath}: {n.sourceId} {n.detail}</p>
+                        ))}
+                      </div>
+                    )}
+                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
+                      {JSON.stringify(previewPayloads[previewIdx].payload, null, 2)}
+                    </pre>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
