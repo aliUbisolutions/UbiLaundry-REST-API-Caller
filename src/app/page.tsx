@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import ConfigBar, { type Config } from '@/components/ConfigBar';
 import Sidebar from '@/components/Sidebar';
 import EndpointPanel from '@/components/EndpointPanel';
@@ -34,6 +35,17 @@ export default function Home() {
       <div className="flex flex-1 min-h-0">
         <div className="w-72 shrink-0 flex flex-col min-h-0">
           <Sidebar selected={selectedId} onSelect={setSelectedId} />
+          <div className="p-3 border-t border-slate-700">
+            <Link
+              href="/import"
+              className="flex items-center gap-2 w-full px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors"
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              Bulk Assignment Import
+            </Link>
+          </div>
         </div>
 
         <div className="flex-1 min-w-0 overflow-hidden">
