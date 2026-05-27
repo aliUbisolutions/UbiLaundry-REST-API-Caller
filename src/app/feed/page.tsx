@@ -151,8 +151,9 @@ export default function FeedPage() {
   const [showPreview, setShowPreview] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-  const abortRef = useRef(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const abortRef   = useRef(false);
+  const fileRef    = useRef<HTMLInputElement>(null);
+  const pendingRef = useRef<Map<number, Partial<RowResult>>>(new Map());
 
   // Conversion state
   const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
@@ -280,8 +281,20 @@ export default function FeedPage() {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
-    const update = (i: number, patch: Partial<RowResult>) =>
-      setResults(prev => prev.map((r, idx) => idx === i ? { ...r, ...patch } : r));
+    pendingRef.current.clear();
+    const update = (i: number, patch: Partial<RowResult>) => {
+      const prev = pendingRef.current.get(i) ?? {};
+      pendingRef.current.set(i, { ...prev, ...patch });
+    };
+    const flush = () => {
+      if (pendingRef.current.size === 0) return;
+      const snapshot = new Map(pendingRef.current);
+      pendingRef.current.clear();
+      setResults(prev => prev.map((r, idx) => {
+        const p = snapshot.get(idx); return p ? { ...r, ...p } : r;
+      }));
+    };
+    const interval = setInterval(flush, 200);
 
     let cursor = 0;
     const worker = async () => {
@@ -327,6 +340,8 @@ export default function FeedPage() {
     };
 
     await Promise.all(Array.from({ length: 3 }, () => worker()));
+    clearInterval(interval);
+    flush();
     setRunning(false);
     setDone(true);
   };

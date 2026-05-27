@@ -173,8 +173,9 @@ export default function ImportPage() {
   const [previewIdx, setPreviewIdx]   = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
-  const abortRef = useRef(false);
-  const fileRef  = useRef<HTMLInputElement>(null);
+  const abortRef   = useRef(false);
+  const fileRef     = useRef<HTMLInputElement>(null);
+  const pendingRef  = useRef<Map<number, Partial<RowResult>>>(new Map());
 
   const targetEnv = useMemo(() =>
     envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
@@ -251,8 +252,21 @@ export default function ImportPage() {
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
-    const update = (index: number, patch: Partial<RowResult>) =>
-      setResults((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+    // Buffer updates and flush in batches to avoid a re-render per row
+    pendingRef.current.clear();
+    const update = (index: number, patch: Partial<RowResult>) => {
+      const prev = pendingRef.current.get(index) ?? {};
+      pendingRef.current.set(index, { ...prev, ...patch });
+    };
+    const flush = () => {
+      if (pendingRef.current.size === 0) return;
+      const snapshot = new Map(pendingRef.current);
+      pendingRef.current.clear();
+      setResults(prev => prev.map((r, i) => {
+        const p = snapshot.get(i); return p ? { ...r, ...p } : r;
+      }));
+    };
+    const interval = setInterval(flush, 200);
 
     let cursor = 0;
     const total = rows.length;
@@ -297,6 +311,8 @@ export default function ImportPage() {
 
     const worker = async () => { while (true) { const idx = cursor++; if (idx >= total) break; await processOne(idx); } };
     await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+    clearInterval(interval);
+    flush();
     setRunning(false);
     setDone(true);
   };
