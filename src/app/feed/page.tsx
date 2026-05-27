@@ -5,6 +5,10 @@ import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
 import { endpoints, type Endpoint } from '@/lib/endpoints';
+import {
+  loadEnvironments, loadConversionTables, applyConversions,
+  type Environment, type ConversionTable,
+} from '@/lib/storage';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -137,6 +141,21 @@ export default function FeedPage() {
   const abortRef = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Conversion state
+  const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
+  const [allTables] = useState<ConversionTable[]>(() => { try { return loadConversionTables(); } catch { return []; } });
+  const [useConversion, setUseConversion]   = useState(false);
+  const [sourceEnvId, setSourceEnvId]       = useState('');
+  const [selectedTableIds, setSelectedTableIds] = useState<string[]>([]);
+
+  const applicableTables = useMemo(() =>
+    allTables.filter(t => t.sourceEnvId === sourceEnvId),
+    [allTables, sourceEnvId]
+  );
+
+  const toggleTable = (id: string) =>
+    setSelectedTableIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
   const endpoint: Endpoint | undefined = useMemo(
     () => POST_ENDPOINTS.find(e => e.id === selectedId),
     [selectedId]
@@ -247,7 +266,21 @@ export default function FeedPage() {
         if (abortRef.current) { update(idx, { status: 'error', message: 'Cancelled' }); continue; }
         update(idx, { status: 'running' });
         try {
-          const body = JSON.stringify(rowToJson(rows[idx], fixedFields));
+          const rawJson = rowToJson(rows[idx], fixedFields);
+
+          // Apply ID conversions if enabled
+          let finalJson = rawJson;
+          if (useConversion && selectedTableIds.length > 0) {
+            const tables = allTables.filter(t => selectedTableIds.includes(t.id));
+            const { converted, errors } = applyConversions(rawJson, tables);
+            if (errors.length > 0) {
+              update(idx, { status: 'error', message: errors.join(' | ') });
+              continue;
+            }
+            finalJson = converted;
+          }
+
+          const body = JSON.stringify(finalJson);
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -459,7 +492,60 @@ export default function FeedPage() {
               </div>
             )}
 
-            {/* Step 4 — Run */}
+            {/* Step 4 — Conversion */}
+            {rows.length > 0 && results.length === 0 && allEnvs.length > 1 && (
+              <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
+                <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">4</span>
+                  ID conversion
+                  <span className="text-slate-500 font-normal text-xs ml-1">— translate IDs from a source environment before sending</span>
+                  <Link href="/conversions" className="ml-auto text-xs text-blue-400 hover:text-blue-300 transition-colors">Manage tables →</Link>
+                </h2>
+
+                <label className="flex items-center gap-2 cursor-pointer mb-4">
+                  <input type="checkbox" checked={useConversion} onChange={e => setUseConversion(e.target.checked)} className="accent-blue-500 w-4 h-4" />
+                  <span className="text-sm text-slate-300">Apply conversion tables</span>
+                </label>
+
+                {useConversion && (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1.5">IDs in my file come from:</label>
+                      <select value={sourceEnvId} onChange={e => { setSourceEnvId(e.target.value); setSelectedTableIds([]); }}
+                        className="bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500">
+                        <option value="">— select source environment —</option>
+                        {allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                      </select>
+                    </div>
+
+                    {sourceEnvId && (
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1.5">Conversion tables to apply:</label>
+                        {applicableTables.length === 0 ? (
+                          <p className="text-slate-500 text-xs">
+                            No tables defined for this source environment.{' '}
+                            <Link href="/conversions" className="text-blue-400 hover:text-blue-300">Create one →</Link>
+                          </p>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {applicableTables.map(t => (
+                              <label key={t.id} className="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" checked={selectedTableIds.includes(t.id)} onChange={() => toggleTable(t.id)} className="accent-blue-500 w-4 h-4" />
+                                <span className="text-sm text-slate-300">{t.name}</span>
+                                <span className="text-xs text-slate-500 font-mono">{t.fieldPath}</span>
+                                <span className="text-xs text-slate-600">({t.mappings.length} mappings)</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 5 — Run */}
             {rows.length > 0 && results.length === 0 && (
               <div className="flex justify-end">
                 <button
