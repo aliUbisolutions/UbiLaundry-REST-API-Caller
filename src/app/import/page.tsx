@@ -8,6 +8,7 @@ import {
   loadEnvironments, loadConversionTables, applyConversions,
   type Environment, type ConversionTable, type ConversionNote,
 } from '@/lib/storage';
+import { APP_VERSION } from '@/lib/version';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
@@ -295,6 +296,7 @@ export default function ImportPage() {
         </Link>
         <div className="w-px h-4 bg-slate-700" />
         <h1 className="text-white font-semibold text-sm">Bulk Assignment Import</h1>
+        <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
         {config.baseUrl
           ? <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>

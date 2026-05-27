@@ -8,6 +8,7 @@ import {
   ENTITY_TYPES,
   type Environment, type ConversionTable, type ConversionMapping, type FallbackStrategy,
 } from '@/lib/storage';
+import { APP_VERSION } from '@/lib/version';
 
 interface IdOption { id: string; label: string; }
 
@@ -168,6 +169,7 @@ export default function ConversionsPage() {
         </Link>
         <div className="w-px h-4 bg-slate-700" />
         <h1 className="text-white font-semibold text-sm">Conversion Tables</h1>
+        <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
         <button onClick={() => setShowForm(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>

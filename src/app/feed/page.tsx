@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
 import { endpoints, type Endpoint } from '@/lib/endpoints';
+import { APP_VERSION } from '@/lib/version';
 import {
   loadEnvironments, loadConversionTables, applyConversions,
   type Environment, type ConversionTable,
@@ -333,6 +334,7 @@ export default function FeedPage() {
         </Link>
         <div className="w-px h-4 bg-slate-700" />
         <h1 className="text-white font-semibold text-sm">Bulk Data Feeder</h1>
+        <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
         {config.baseUrl
           ? <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>

@@ -6,6 +6,7 @@ import {
   loadEnvironments, saveEnvironments, saveActiveConfig,
   genId, type Environment, type ActiveConfig,
 } from '@/lib/storage';
+import { APP_VERSION } from '@/lib/version';
 
 export type { ActiveConfig as Config };
 
@@ -77,6 +78,7 @@ export default function ConfigBar({ config, onChange }: Props) {
             <path d="M5 8h14M5 12h14M5 16h8" stroke="white" strokeWidth="2" strokeLinecap="round" />
           </svg>
           <span className="font-bold text-white text-sm tracking-wide hidden sm:inline">UbiLaundry API</span>
+          <span className="text-slate-500 text-xs font-mono hidden sm:inline">v{APP_VERSION}</span>
         </div>
 
         {/* Environment switcher */}
