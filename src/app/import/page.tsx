@@ -53,6 +53,7 @@ function buildPayload(row: Row, reassign: boolean, returnValue: boolean) {
   const item: Record<string, unknown> = {
     '@class': 'net.ubisolutions.ubimanager.entities.laundry.ItemLaundry',
     id: String(row.id).trim(),
+    attributeLinks: [],
   };
 
   const encodingDate = parseDate(row.encodingDate);
