@@ -145,6 +145,20 @@ export default function ConversionsPage() {
 
   const envName = (id: string) => envs.find(e => e.id === id)?.name ?? id;
 
+  // Group tables by source→target pair
+  const grouped = tables.reduce<Record<string, ConversionTable[]>>((acc, t) => {
+    const key = `${t.sourceEnvId}__${t.targetEnvId}`;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(t);
+    return acc;
+  }, {});
+
+  const openNewForPair = (sourceEnvId: string, targetEnvId: string) => {
+    setForm({ name: '', sourceEnvId, targetEnvId });
+    setFormPaths(['']);
+    setShowForm(true);
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 text-white flex flex-col">
       <div className="bg-slate-800 border-b border-slate-700 px-5 py-3 flex items-center gap-4">
@@ -162,23 +176,60 @@ export default function ConversionsPage() {
       </div>
 
       <div className="flex flex-1 min-h-0">
-        {/* Table list */}
-        <div className="w-72 shrink-0 border-r border-slate-700 overflow-y-auto">
+        {/* Table list — grouped by env pair */}
+        <div className="w-80 shrink-0 border-r border-slate-700 overflow-y-auto">
           {tables.length === 0 ? (
             <div className="p-6 text-center">
               <p className="text-slate-500 text-sm mb-3">No conversion tables yet.</p>
               <button onClick={() => setShowForm(true)} className="text-blue-400 hover:text-blue-300 text-xs transition-colors">Create one →</button>
             </div>
           ) : (
-            <div className="p-2 space-y-1">
-              {tables.map(t => (
-                <button key={t.id} onClick={() => { setSelected(t); setSourceIds([]); setTargetIds([]); setLoadError(''); }}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors group ${selected?.id === t.id ? 'bg-slate-700' : 'hover:bg-slate-800'}`}>
-                  <p className="text-white text-sm font-medium truncate">{t.name}</p>
-                  <p className="text-slate-500 text-xs mt-0.5 truncate">{envName(t.sourceEnvId)} → {envName(t.targetEnvId)}</p>
-                  <p className="text-slate-600 text-xs font-mono truncate">{t.fieldPaths.join(', ')} · {t.mappings.length} mappings</p>
-                </button>
-              ))}
+            <div className="p-3 space-y-4">
+              {Object.entries(grouped).map(([pairKey, pairTables]) => {
+                const [srcId, tgtId] = pairKey.split('__');
+                return (
+                  <div key={pairKey}>
+                    {/* Pair header */}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-blue-300 text-xs font-medium truncate">{envName(srcId)}</span>
+                        <svg className="w-3 h-3 text-slate-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                        </svg>
+                        <span className="text-emerald-300 text-xs font-medium truncate">{envName(tgtId)}</span>
+                      </div>
+                      <button
+                        onClick={() => openNewForPair(srcId, tgtId)}
+                        title="Add table for this pair"
+                        className="text-slate-500 hover:text-blue-400 transition-colors shrink-0 ml-2"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                      </button>
+                    </div>
+
+                    {/* Table cards */}
+                    <div className="space-y-1.5 pl-1">
+                      {pairTables.map(t => (
+                        <button
+                          key={t.id}
+                          onClick={() => { setSelected(t); setSourceIds([]); setTargetIds([]); setLoadError(''); }}
+                          className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
+                            selected?.id === t.id
+                              ? 'bg-slate-700 border-slate-600'
+                              : 'bg-slate-800/50 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600'
+                          }`}
+                        >
+                          <p className="text-white text-sm font-medium truncate">{t.name}</p>
+                          <p className="text-slate-500 text-xs font-mono mt-1 truncate">{t.fieldPaths.join(', ')}</p>
+                          <p className="text-slate-600 text-xs mt-0.5">{t.mappings.length} mapping{t.mappings.length !== 1 ? 's' : ''}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
