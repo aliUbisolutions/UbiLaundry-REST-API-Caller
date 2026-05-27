@@ -619,11 +619,10 @@ export default function FeedPage() {
                 <div className="px-4 py-3 border-b border-slate-700">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-4 text-xs">
-                      <span className="text-emerald-400">{counts.ok ?? 0} ok</span>
-                      {(counts['ok-substituted'] ?? 0) > 0 && <span className="text-yellow-400">{counts['ok-substituted']} ok*</span>}
-                      <span className="text-red-400">{counts.error ?? 0} error</span>
-                      <span className="text-slate-500">{counts.pending ?? 0} pending</span>
-                      {(counts['ok-substituted'] ?? 0) > 0 && <span className="text-slate-600 text-xs">* default or source value used</span>}
+                      <span className="text-emerald-400">{(counts.ok ?? 0) + (counts['ok-substituted'] ?? 0)} ok</span>
+                      {(counts['ok-substituted'] ?? 0) > 0 && <span className="text-yellow-400 text-xs">({counts['ok-substituted']} with substitutions)</span>}
+                      {(counts.error ?? 0) > 0 && <span className="text-red-400">{counts.error} error</span>}
+                      {(counts.pending ?? 0) > 0 && <span className="text-slate-500">{counts.pending} pending</span>}
                     </div>
                     <div className="flex gap-2">
                       {running && (
@@ -646,79 +645,73 @@ export default function FeedPage() {
                   </div>
                   <p className="text-xs text-slate-500 mt-1">{processed} / {rows.length}</p>
                 </div>
-                <div className="overflow-x-auto max-h-96 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-slate-800">
-                      <tr className="border-b border-slate-700">
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium w-8">#</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Status</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Row preview</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Message / Substitutions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {results.map((r) => (
-                        <Fragment key={r.index}>
-                          <tr
-                            onClick={() => setExpandedIdx(prev => prev === r.index ? null : r.index)}
-                            className="border-b border-slate-700/30 cursor-pointer hover:bg-slate-700/30 transition-colors"
-                          >
-                            <td className="px-4 py-2 text-slate-600">{r.index + 1}</td>
-                            <td className="px-4 py-2">
-                              <div className="flex items-center gap-1.5">
-                                {STATUS_ICON[r.status]}
-                                <span className={
-                                  r.status === 'ok'             ? 'text-emerald-400' :
-                                  r.status === 'ok-substituted' ? 'text-yellow-400' :
-                                  r.status === 'error'          ? 'text-red-400' :
-                                  r.status === 'running'        ? 'text-blue-400' : 'text-slate-600'
-                                }>
-                                  {(r.status === 'ok' || r.status === 'ok-substituted') && r.httpStatus
-                                    ? `${r.status === 'ok-substituted' ? 'ok*' : 'ok'} (${r.httpStatus})${r.elapsed ? ` · ${r.elapsed}ms` : ''}`
-                                    : r.status}{r.status === 'error' && r.httpStatus ? ` (${r.httpStatus})` : ''}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[200px]">{r.rowPreview}</td>
-                            <td className="px-4 py-2">
-                              <div className="flex items-center gap-2">
-                                <span className="truncate max-w-xs">
-                                  {r.message && <span className="text-slate-500">{r.message}</span>}
-                                  {r.notes   && <span className="text-yellow-600 text-xs">{r.notes}</span>}
-                                </span>
-                                <span className="text-slate-600 shrink-0">{expandedIdx === r.index ? '▲' : '▼'}</span>
-                              </div>
-                            </td>
-                          </tr>
-                          {expandedIdx === r.index && (
-                            <tr className="bg-slate-950 border-b border-slate-700">
-                              <td colSpan={4} className="px-4 py-4">
-                                <div className="grid grid-cols-2 gap-4">
-                                  <div>
-                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload sent</p>
-                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
-                                      {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
-                                    </pre>
-                                  </div>
-                                  <div>
-                                    <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
-                                      Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
-                                    </p>
-                                    <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
-                                      {r.responseBody !== undefined && r.responseBody !== null
-                                        ? JSON.stringify(r.responseBody, null, 2)
-                                        : r.message ?? '—'}
-                                    </pre>
-                                  </div>
+
+                {results.some(r => r.status === 'error') && (
+                  <div className="overflow-y-auto max-h-[460px]">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-slate-800 border-b border-slate-700">
+                        <tr>
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium w-8">#</th>
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium">Row</th>
+                          <th className="text-left px-4 py-2 text-slate-400 font-medium">Error</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {results.map((r, i) => r.status !== 'error' ? null : (
+                          <Fragment key={i}>
+                            <tr
+                              onClick={() => setExpandedIdx(prev => prev === i ? null : i)}
+                              className="border-b border-slate-700/30 cursor-pointer hover:bg-red-900/10 transition-colors"
+                            >
+                              <td className="px-4 py-2 text-slate-600">{i + 1}</td>
+                              <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[160px]">{r.rowPreview}</td>
+                              <td className="px-4 py-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-red-400 truncate max-w-xs">
+                                    {r.httpStatus ? `HTTP ${r.httpStatus} · ` : ''}{r.message}
+                                  </span>
+                                  <span className="text-slate-600 shrink-0">{expandedIdx === i ? '▲' : '▼'}</span>
                                 </div>
                               </td>
                             </tr>
-                          )}
-                        </Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                            {expandedIdx === i && (
+                              <tr className="bg-slate-950 border-b border-slate-700">
+                                <td colSpan={3} className="px-4 py-4">
+                                  <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                      <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">Request payload sent</p>
+                                      <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                        {r.payload ? JSON.stringify(r.payload, null, 2) : '—'}
+                                      </pre>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wide">
+                                        Server response{r.httpStatus ? ` · HTTP ${r.httpStatus}` : ''}
+                                      </p>
+                                      <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-slate-900 rounded p-3 max-h-72 overflow-y-auto leading-relaxed">
+                                        {r.responseBody !== undefined && r.responseBody !== null
+                                          ? JSON.stringify(r.responseBody, null, 2)
+                                          : r.message ?? '—'}
+                                      </pre>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {done && !results.some(r => r.status === 'error') && (
+                  <div className="px-4 py-6 text-center">
+                    <p className="text-emerald-400 text-sm font-medium">
+                      All {(counts.ok ?? 0) + (counts['ok-substituted'] ?? 0)} rows sent successfully.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </>
