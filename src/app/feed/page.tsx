@@ -532,7 +532,7 @@ export default function FeedPage() {
                               <label key={t.id} className="flex items-center gap-2 cursor-pointer">
                                 <input type="checkbox" checked={selectedTableIds.includes(t.id)} onChange={() => toggleTable(t.id)} className="accent-blue-500 w-4 h-4" />
                                 <span className="text-sm text-slate-300">{t.name}</span>
-                                <span className="text-xs text-slate-500 font-mono">{t.fieldPath}</span>
+                                <span className="text-xs text-slate-500 font-mono">{t.fieldPaths.join(', ')}</span>
                                 <span className="text-xs text-slate-600">({t.mappings.length} mappings)</span>
                               </label>
                             ))}

@@ -19,7 +19,7 @@ export interface ConversionTable {
   name: string;
   sourceEnvId: string;
   targetEnvId: string;
-  fieldPath: string;   // dot-notation, e.g. "lastSeenLocation.id"
+  fieldPaths: string[];  // all dot-notation paths sharing the same ID space, e.g. ["lastSeenLocation.id", "reportLocation.id"]
   mappings: ConversionMapping[];
 }
 
@@ -47,8 +47,18 @@ export function saveEnvironments(envs: Environment[]): void {
 
 // ─── Conversion tables ────────────────────────────────────────────────────────
 
+// Migrate tables that still use the old single fieldPath string
+function migrate(tables: ConversionTable[]): ConversionTable[] {
+  return tables.map(t => {
+    const legacy = t as ConversionTable & { fieldPath?: string };
+    if (!t.fieldPaths && legacy.fieldPath) return { ...t, fieldPaths: [legacy.fieldPath] };
+    if (!t.fieldPaths) return { ...t, fieldPaths: [] };
+    return t;
+  });
+}
+
 export function loadConversionTables(): ConversionTable[] {
-  try { return JSON.parse(localStorage.getItem(TABLES_KEY) ?? '[]'); } catch { return []; }
+  try { return migrate(JSON.parse(localStorage.getItem(TABLES_KEY) ?? '[]')); } catch { return []; }
 }
 
 export function saveConversionTables(tables: ConversionTable[]): void {
@@ -137,15 +147,17 @@ export function applyConversions(
   const errors: string[] = [];
 
   for (const table of tables) {
-    const raw = getPath(converted, table.fieldPath);
-    if (raw === null || raw === undefined) continue;
-    const sourceId = String(raw);
-    const mapping = table.mappings.find(m => String(m.sourceId) === sourceId);
-    if (!mapping) {
-      errors.push(`No mapping for ${table.fieldPath}="${sourceId}" in table "${table.name}"`);
-    } else {
-      const n = Number(mapping.targetId);
-      setPath(converted, table.fieldPath, isNaN(n) ? mapping.targetId : n);
+    for (const fieldPath of table.fieldPaths) {
+      const raw = getPath(converted, fieldPath);
+      if (raw === null || raw === undefined) continue;
+      const sourceId = String(raw);
+      const mapping = table.mappings.find(m => String(m.sourceId) === sourceId);
+      if (!mapping) {
+        errors.push(`No mapping for ${fieldPath}="${sourceId}" in table "${table.name}"`);
+      } else {
+        const n = Number(mapping.targetId);
+        setPath(converted, fieldPath, isNaN(n) ? mapping.targetId : n);
+      }
     }
   }
 

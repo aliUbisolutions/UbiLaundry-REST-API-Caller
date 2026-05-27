@@ -11,6 +11,19 @@ import {
 
 interface IdOption { id: string; label: string; }
 
+function AddPathInline({ onAdd }: { onAdd: (p: string) => void }) {
+  const [val, setVal] = useState('');
+  const commit = () => { if (val.trim()) { onAdd(val.trim()); setVal(''); } };
+  return (
+    <span className="flex items-center gap-1">
+      <input value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => e.key === 'Enter' && commit()}
+        placeholder="add field path…"
+        className="bg-slate-800 border border-slate-600 text-white text-xs rounded px-2 py-0.5 w-40 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600" />
+      <button onClick={commit} className="text-blue-400 hover:text-blue-300 text-xs transition-colors">+</button>
+    </span>
+  );
+}
+
 function extractIdOptions(items: unknown[]): IdOption[] {
   return items.map((item) => {
     const o = item as Record<string, unknown>;
@@ -27,7 +40,8 @@ export default function ConversionsPage() {
 
   // New table form
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', sourceEnvId: '', targetEnvId: '', fieldPath: '' });
+  const [form, setForm] = useState({ name: '', sourceEnvId: '', targetEnvId: '' });
+  const [formPaths, setFormPaths] = useState<string[]>(['']);
 
   // ID loading for mapping editor
   const [entityType, setEntityType]   = useState('Location');
@@ -44,12 +58,32 @@ export default function ConversionsPage() {
   const persist = (updated: ConversionTable[]) => { saveConversionTables(updated); setTables(updated); };
 
   const createTable = () => {
-    if (!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || !form.fieldPath.trim()) return;
-    const t: ConversionTable = { id: genId(), ...form, mappings: [] };
+    const validPaths = formPaths.map(p => p.trim()).filter(Boolean);
+    if (!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || validPaths.length === 0) return;
+    const t: ConversionTable = { id: genId(), ...form, fieldPaths: validPaths, mappings: [] };
     persist([...tables, t]);
     setSelected(t);
     setShowForm(false);
-    setForm({ name: '', sourceEnvId: '', targetEnvId: '', fieldPath: '' });
+    setForm({ name: '', sourceEnvId: '', targetEnvId: '' });
+    setFormPaths(['']);
+  };
+
+  const addFormPath    = () => setFormPaths(p => [...p, '']);
+  const removeFormPath = (i: number) => setFormPaths(p => p.filter((_, idx) => idx !== i));
+  const updateFormPath = (i: number, v: string) => setFormPaths(p => p.map((x, idx) => idx === i ? v : x));
+
+  const addTablePath = (path: string) => {
+    if (!selected || !path.trim()) return;
+    const updated = { ...selected, fieldPaths: [...selected.fieldPaths, path.trim()] };
+    persist(tables.map(t => t.id === selected.id ? updated : t));
+    setSelected(updated);
+  };
+
+  const removeTablePath = (i: number) => {
+    if (!selected) return;
+    const updated = { ...selected, fieldPaths: selected.fieldPaths.filter((_, idx) => idx !== i) };
+    persist(tables.map(t => t.id === selected.id ? updated : t));
+    setSelected(updated);
   };
 
   const deleteTable = (id: string) => {
@@ -142,7 +176,7 @@ export default function ConversionsPage() {
                   className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors group ${selected?.id === t.id ? 'bg-slate-700' : 'hover:bg-slate-800'}`}>
                   <p className="text-white text-sm font-medium truncate">{t.name}</p>
                   <p className="text-slate-500 text-xs mt-0.5 truncate">{envName(t.sourceEnvId)} → {envName(t.targetEnvId)}</p>
-                  <p className="text-slate-600 text-xs font-mono">{t.fieldPath} · {t.mappings.length} mappings</p>
+                  <p className="text-slate-600 text-xs font-mono truncate">{t.fieldPaths.join(', ')} · {t.mappings.length} mappings</p>
                 </button>
               ))}
             </div>
@@ -159,15 +193,23 @@ export default function ConversionsPage() {
             <div className="p-6 max-w-3xl space-y-6">
               {/* Header */}
               <div className="flex items-start justify-between">
-                <div>
+                <div className="min-w-0">
                   <h2 className="text-white text-lg font-semibold">{selected.name}</h2>
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-blue-300">{envName(selected.sourceEnvId)}</span>
                     {' → '}
                     <span className="text-emerald-300">{envName(selected.targetEnvId)}</span>
-                    {' · field: '}
-                    <code className="text-slate-300 font-mono">{selected.fieldPath}</code>
                   </p>
+                  {/* Field paths */}
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {selected.fieldPaths.map((fp, i) => (
+                      <span key={i} className="flex items-center gap-1 bg-slate-700 text-slate-300 text-xs px-2 py-0.5 rounded font-mono">
+                        {fp}
+                        <button onClick={() => removeTablePath(i)} className="text-slate-500 hover:text-red-400 transition-colors ml-0.5">✕</button>
+                      </span>
+                    ))}
+                    <AddPathInline onAdd={addTablePath} />
+                  </div>
                 </div>
                 <button onClick={() => deleteTable(selected.id)} className="text-xs text-slate-500 hover:text-red-400 px-2.5 py-1.5 border border-slate-700 rounded transition-colors">
                   Delete table
@@ -304,17 +346,29 @@ export default function ConversionsPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">Field path in JSON body</label>
-                <input type="text" value={form.fieldPath} onChange={e => setForm({ ...form, fieldPath: e.target.value })}
-                  placeholder="e.g. lastSeenLocation.id"
-                  className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500 font-mono placeholder:text-slate-600" />
-                <p className="text-xs text-slate-600 mt-1">Use dot-notation for nested fields</p>
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                  Field paths in JSON body
+                  <span className="text-slate-600 font-normal ml-1">— add all paths that share the same ID space</span>
+                </label>
+                <div className="space-y-1.5">
+                  {formPaths.map((p, i) => (
+                    <div key={i} className="flex gap-2">
+                      <input type="text" value={p} onChange={e => updateFormPath(i, e.target.value)}
+                        placeholder="e.g. lastSeenLocation.id"
+                        className="flex-1 bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500 font-mono placeholder:text-slate-600" />
+                      {formPaths.length > 1 && (
+                        <button onClick={() => removeFormPath(i)} className="text-slate-500 hover:text-red-400 transition-colors px-2">✕</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <button onClick={addFormPath} className="text-xs text-blue-400 hover:text-blue-300 transition-colors mt-1.5">+ Add another path</button>
               </div>
             </div>
             <div className="flex gap-2 px-5 pb-5 justify-end">
               <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
               <button onClick={createTable}
-                disabled={!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || !form.fieldPath.trim()}
+                disabled={!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || !formPaths.some(p => p.trim())}
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded transition-colors">
                 Create
               </button>
