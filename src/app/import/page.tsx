@@ -12,17 +12,7 @@ import { APP_VERSION } from '@/lib/version';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
-interface Row {
-  id: string;
-  encodingDate?: string;
-  firstSeenDate?: string;
-  lastSeenDate?: string;
-  lastSeenLocation?: string | number;
-  category?: string | number;
-  comment?: string;
-  killed?: string | number;
-  [key: string]: unknown;
-}
+type Row = Record<string, unknown>;
 
 type RowStatus = 'pending' | 'running' | 'ok' | 'error' | 'skipped';
 
@@ -51,25 +41,60 @@ function toInt(val: unknown): number | null {
   return isNaN(n) ? null : n;
 }
 
-function buildPayload(row: Row, reassign: boolean, returnValue: boolean): Record<string, unknown> {
+// Fields whose value becomes { id: N } in the item payload
+const NESTED_ID_FIELDS = new Set([
+  'category', 'lastSeenLocation', 'lastSeenWorkstation', 'lastMovementType',
+  'lastReportLocation', 'itemType', 'container', 'client', 'department',
+  'holder', 'owner', 'locationtype',
+]);
+// Fields parsed as ISO date strings
+const DATE_FIELDS = new Set([
+  'encodingDate', 'firstSeenDate', 'lastSeenDate', 'lastSeenDateTemp', 'inventoryDate',
+]);
+// Fields converted 0/1 → boolean
+const BOOL_FIELDS = new Set(['killed']);
+// Columns to ignore entirely
+const SKIP_FIELDS = new Set(['_Upd', '__EMPTY', '']);
+
+function buildPayload(row: Record<string, unknown>, reassign: boolean, returnValue: boolean): Record<string, unknown> {
   const item: Record<string, unknown> = {
     '@class': 'net.ubisolutions.ubimanager.entities.laundry.ItemLaundry',
-    id: String(row.id).trim(),
     attributeLinks: [],
   };
-  const encodingDate = parseDate(row.encodingDate);
-  if (encodingDate) item.encodingDate = encodingDate;
-  const firstSeenDate = parseDate(row.firstSeenDate);
-  if (firstSeenDate) item.firstSeenDate = firstSeenDate;
-  const lastSeenDate = parseDate(row.lastSeenDate);
-  if (lastSeenDate) item.lastSeenDate = lastSeenDate;
-  const categoryId = toInt(row.category);
-  if (categoryId !== null) item.category = { id: categoryId };
-  const locationId = toInt(row.lastSeenLocation);
-  if (locationId !== null) item.lastSeenLocation = { id: locationId };
-  if (row.comment && row.comment !== 'NULL') item.comment = row.comment;
-  const killed = toInt(row.killed);
-  if (killed !== null) item.killed = killed === 1;
+
+  for (const [col, val] of Object.entries(row)) {
+    if (SKIP_FIELDS.has(col)) continue;
+
+    if (col === 'id') {
+      const s = String(val ?? '').trim();
+      if (s) item.id = s;
+      continue;
+    }
+
+    if (DATE_FIELDS.has(col)) {
+      const parsed = parseDate(val);
+      if (parsed) item[col] = parsed;
+      continue;
+    }
+
+    if (NESTED_ID_FIELDS.has(col)) {
+      const n = toInt(val);
+      if (n !== null) item[col] = { id: n };
+      continue;
+    }
+
+    if (BOOL_FIELDS.has(col)) {
+      const n = toInt(val);
+      if (n !== null) item[col] = n === 1;
+      continue;
+    }
+
+    // Generic: skip null / empty / NULL
+    if (val === null || val === undefined || val === '' || String(val) === 'NULL') continue;
+    const n = toInt(val);
+    item[col] = n !== null ? n : String(val);
+  }
+
   return { item, reassign, returnValue };
 }
 
@@ -168,10 +193,14 @@ export default function ImportPage() {
 
   const previewPayloads = useMemo(() =>
     rows.map(r => {
-      const raw = buildPayload(r, reassign, returnValue);
-      if (activeTables.length === 0) return { payload: raw, errors: [] as string[], notes: [] as ConversionNote[] };
-      const result = applyConversions(raw, activeTables);
-      return { payload: result.converted as Record<string, unknown>, errors: result.errors, notes: result.notes };
+      // Apply conversions to the flat CSV row first (paths match CSV column names),
+      // then build the nested assignment payload from the converted row.
+      if (activeTables.length > 0) {
+        const result = applyConversions(r as Record<string, unknown>, activeTables);
+        const payload = buildPayload(result.converted as Record<string, unknown>, reassign, returnValue);
+        return { payload, errors: result.errors, notes: result.notes };
+      }
+      return { payload: buildPayload(r as Record<string, unknown>, reassign, returnValue), errors: [] as string[], notes: [] as ConversionNote[] };
     }),
     [rows, reassign, returnValue, activeTables]
   );
