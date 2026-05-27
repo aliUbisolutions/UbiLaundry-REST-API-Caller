@@ -14,13 +14,18 @@ export interface ConversionMapping {
   label?: string;
 }
 
+export type FallbackStrategy = 'error' | 'default' | 'keep-source';
+
 export interface ConversionTable {
   id: string;
   name: string;
   sourceEnvId: string;
   targetEnvId: string;
-  fieldPaths: string[];  // all dot-notation paths sharing the same ID space, e.g. ["lastSeenLocation.id", "reportLocation.id"]
+  fieldPaths: string[];
   mappings: ConversionMapping[];
+  fallback: FallbackStrategy;       // what to do when no mapping matches
+  fallbackDefaultId?: string;       // used when fallback === 'default'
+  fallbackDefaultLabel?: string;    // display label for the default value
 }
 
 // ─── Key constants ────────────────────────────────────────────────────────────
@@ -47,13 +52,15 @@ export function saveEnvironments(envs: Environment[]): void {
 
 // ─── Conversion tables ────────────────────────────────────────────────────────
 
-// Migrate tables that still use the old single fieldPath string
 function migrate(tables: ConversionTable[]): ConversionTable[] {
   return tables.map(t => {
     const legacy = t as ConversionTable & { fieldPath?: string };
-    if (!t.fieldPaths && legacy.fieldPath) return { ...t, fieldPaths: [legacy.fieldPath] };
-    if (!t.fieldPaths) return { ...t, fieldPaths: [] };
-    return t;
+    const withPaths = (!t.fieldPaths && legacy.fieldPath)
+      ? { ...t, fieldPaths: [legacy.fieldPath] }
+      : !t.fieldPaths ? { ...t, fieldPaths: [] } : t;
+    // default fallback for tables created before this field existed
+    if (!withPaths.fallback) return { ...withPaths, fallback: 'error' as FallbackStrategy };
+    return withPaths;
   });
 }
 
@@ -134,9 +141,22 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
   cur[keys[keys.length - 1]] = value;
 }
 
+function coerceId(id: string): unknown {
+  const n = Number(id);
+  return isNaN(n) ? id : n;
+}
+
+export interface ConversionNote {
+  fieldPath: string;
+  sourceId: string;
+  action: 'mapped' | 'default' | 'kept-source' | 'error';
+  detail: string;
+}
+
 export interface ConversionResult {
   converted: Record<string, unknown>;
-  errors: string[];
+  errors: string[];   // fatal — row should not be sent
+  notes: ConversionNote[];  // informational — row is sent but something was substituted
 }
 
 export function applyConversions(
@@ -145,21 +165,44 @@ export function applyConversions(
 ): ConversionResult {
   const converted: Record<string, unknown> = JSON.parse(JSON.stringify(json));
   const errors: string[] = [];
+  const notes: ConversionNote[] = [];
 
   for (const table of tables) {
     for (const fieldPath of table.fieldPaths) {
       const raw = getPath(converted, fieldPath);
       if (raw === null || raw === undefined) continue;
+
       const sourceId = String(raw);
-      const mapping = table.mappings.find(m => String(m.sourceId) === sourceId);
-      if (!mapping) {
-        errors.push(`No mapping for ${fieldPath}="${sourceId}" in table "${table.name}"`);
-      } else {
-        const n = Number(mapping.targetId);
-        setPath(converted, fieldPath, isNaN(n) ? mapping.targetId : n);
+      const mapping  = table.mappings.find(m => String(m.sourceId) === sourceId);
+
+      if (mapping) {
+        setPath(converted, fieldPath, coerceId(mapping.targetId));
+        notes.push({ fieldPath, sourceId, action: 'mapped', detail: `→ ${mapping.targetId}${mapping.label ? ` (${mapping.label})` : ''}` });
+        continue;
+      }
+
+      // No mapping found — apply fallback strategy
+      switch (table.fallback) {
+        case 'error':
+          errors.push(`[${table.name}] ${fieldPath}="${sourceId}": no mapping found`);
+          break;
+
+        case 'default':
+          if (!table.fallbackDefaultId) {
+            errors.push(`[${table.name}] ${fieldPath}="${sourceId}": no mapping and no default configured`);
+          } else {
+            setPath(converted, fieldPath, coerceId(table.fallbackDefaultId));
+            notes.push({ fieldPath, sourceId, action: 'default', detail: `→ default ${table.fallbackDefaultId}${table.fallbackDefaultLabel ? ` (${table.fallbackDefaultLabel})` : ''}` });
+          }
+          break;
+
+        case 'keep-source':
+          // value stays as-is
+          notes.push({ fieldPath, sourceId, action: 'kept-source', detail: 'source value kept' });
+          break;
       }
     }
   }
 
-  return { converted, errors };
+  return { converted, errors, notes };
 }

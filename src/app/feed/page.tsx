@@ -18,7 +18,7 @@ interface Config {
   password: string;
 }
 
-type RowStatus = 'pending' | 'running' | 'ok' | 'error';
+type RowStatus = 'pending' | 'running' | 'ok' | 'ok-substituted' | 'error';
 
 interface RowResult {
   index: number;
@@ -26,6 +26,7 @@ interface RowResult {
   status: RowStatus;
   httpStatus?: number;
   message?: string;
+  notes?: string;   // substitution details (default / keep-source applied)
 }
 
 // ─── JSON building ───────────────────────────────────────────────────────────
@@ -109,6 +110,11 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
   ),
   ok: (
     <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+    </svg>
+  ),
+  'ok-substituted': (
+    <svg className="w-4 h-4 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
     </svg>
   ),
@@ -270,14 +276,19 @@ export default function FeedPage() {
 
           // Apply ID conversions if enabled
           let finalJson = rawJson;
+          let substitutionNotes = '';
           if (useConversion && selectedTableIds.length > 0) {
             const tables = allTables.filter(t => selectedTableIds.includes(t.id));
-            const { converted, errors } = applyConversions(rawJson, tables);
+            const { converted, errors, notes } = applyConversions(rawJson, tables);
             if (errors.length > 0) {
               update(idx, { status: 'error', message: errors.join(' | ') });
               continue;
             }
             finalJson = converted;
+            const subs = notes.filter(n => n.action === 'default' || n.action === 'kept-source');
+            if (subs.length > 0) {
+              substitutionNotes = subs.map(n => `${n.fieldPath}: ${n.detail}`).join('; ');
+            }
           }
 
           const body = JSON.stringify(finalJson);
@@ -290,7 +301,8 @@ export default function FeedPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error });
           } else if (data.status >= 200 && data.status < 300) {
-            update(idx, { status: 'ok', httpStatus: data.status });
+            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined });
           } else {
             const msg = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
             update(idx, { status: 'error', httpStatus: data.status, message: msg.slice(0, 150) });
@@ -307,7 +319,7 @@ export default function FeedPage() {
   };
 
   const counts = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);
-  const processed = (counts.ok ?? 0) + (counts.error ?? 0);
+  const processed = (counts.ok ?? 0) + (counts['ok-substituted'] ?? 0) + (counts.error ?? 0);
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -568,8 +580,10 @@ export default function FeedPage() {
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-4 text-xs">
                       <span className="text-emerald-400">{counts.ok ?? 0} ok</span>
+                      {(counts['ok-substituted'] ?? 0) > 0 && <span className="text-yellow-400">{counts['ok-substituted']} ok*</span>}
                       <span className="text-red-400">{counts.error ?? 0} error</span>
                       <span className="text-slate-500">{counts.pending ?? 0} pending</span>
+                      {(counts['ok-substituted'] ?? 0) > 0 && <span className="text-slate-600 text-xs">* default or source value used</span>}
                     </div>
                     <div className="flex gap-2">
                       {running && (
@@ -599,7 +613,7 @@ export default function FeedPage() {
                         <th className="text-left px-4 py-2 text-slate-400 font-medium w-8">#</th>
                         <th className="text-left px-4 py-2 text-slate-400 font-medium">Status</th>
                         <th className="text-left px-4 py-2 text-slate-400 font-medium">Row preview</th>
-                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Message</th>
+                        <th className="text-left px-4 py-2 text-slate-400 font-medium">Message / Substitutions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -610,16 +624,22 @@ export default function FeedPage() {
                             <div className="flex items-center gap-1.5">
                               {STATUS_ICON[r.status]}
                               <span className={
-                                r.status === 'ok' ? 'text-emerald-400' :
-                                r.status === 'error' ? 'text-red-400' :
-                                r.status === 'running' ? 'text-blue-400' : 'text-slate-600'
+                                r.status === 'ok'             ? 'text-emerald-400' :
+                                r.status === 'ok-substituted' ? 'text-yellow-400' :
+                                r.status === 'error'          ? 'text-red-400' :
+                                r.status === 'running'        ? 'text-blue-400' : 'text-slate-600'
                               }>
-                                {r.status === 'ok' && r.httpStatus ? `ok (${r.httpStatus})` : r.status}
+                                {(r.status === 'ok' || r.status === 'ok-substituted') && r.httpStatus
+                                  ? `${r.status === 'ok-substituted' ? 'ok*' : 'ok'} (${r.httpStatus})`
+                                  : r.status}
                               </span>
                             </div>
                           </td>
-                          <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[220px]">{r.rowPreview}</td>
-                          <td className="px-4 py-2 text-slate-500 truncate max-w-[260px]">{r.message ?? ''}</td>
+                          <td className="px-4 py-2 font-mono text-slate-300 truncate max-w-[200px]">{r.rowPreview}</td>
+                          <td className="px-4 py-2 truncate max-w-[280px]">
+                            {r.message && <span className="text-slate-500">{r.message}</span>}
+                            {r.notes   && <span className="text-yellow-600 text-xs">{r.notes}</span>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

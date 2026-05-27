@@ -6,7 +6,7 @@ import {
   loadEnvironments, loadConversionTables, saveConversionTables,
   proxyGet, genId,
   ENTITY_TYPES,
-  type Environment, type ConversionTable, type ConversionMapping,
+  type Environment, type ConversionTable, type ConversionMapping, type FallbackStrategy,
 } from '@/lib/storage';
 
 interface IdOption { id: string; label: string; }
@@ -60,7 +60,7 @@ export default function ConversionsPage() {
   const createTable = () => {
     const validPaths = formPaths.map(p => p.trim()).filter(Boolean);
     if (!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || validPaths.length === 0) return;
-    const t: ConversionTable = { id: genId(), ...form, fieldPaths: validPaths, mappings: [] };
+    const t: ConversionTable = { id: genId(), ...form, fieldPaths: validPaths, mappings: [], fallback: 'error' };
     persist([...tables, t]);
     setSelected(t);
     setShowForm(false);
@@ -294,6 +294,77 @@ export default function ConversionsPage() {
                   <div className="flex gap-4 text-xs text-slate-400">
                     {sourceIds.length > 0 && <span className="text-blue-300">{sourceIds.length} source IDs loaded</span>}
                     {targetIds.length > 0 && <span className="text-emerald-300">{targetIds.length} target IDs loaded</span>}
+                  </div>
+                )}
+              </div>
+
+              {/* Fallback strategy */}
+              <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 space-y-3">
+                <p className="text-sm font-medium text-slate-300">When no mapping matches…</p>
+                <div className="space-y-2">
+                  {([
+                    { value: 'error',       label: 'Return an error for the row',  desc: 'Row is skipped and logged. Other rows continue.' },
+                    { value: 'default',     label: 'Use a default target value',   desc: 'Apply a fixed target ID when the source ID is unknown.' },
+                    { value: 'keep-source', label: 'Keep the source value as-is',  desc: 'The original ID from the file is sent unchanged.' },
+                  ] as { value: FallbackStrategy; label: string; desc: string }[]).map(opt => (
+                    <label key={opt.value} className="flex items-start gap-3 cursor-pointer group">
+                      <input type="radio" name="fallback" value={opt.value}
+                        checked={selected.fallback === opt.value}
+                        onChange={() => {
+                          const updated = { ...selected, fallback: opt.value };
+                          persist(tables.map(t => t.id === selected.id ? updated : t));
+                          setSelected(updated);
+                        }}
+                        className="accent-blue-500 mt-0.5 shrink-0" />
+                      <div>
+                        <span className="text-sm text-slate-200">{opt.label}</span>
+                        <p className="text-xs text-slate-500">{opt.desc}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+
+                {/* Default value picker */}
+                {selected.fallback === 'default' && (
+                  <div className="pt-2 border-t border-slate-700 space-y-2">
+                    <p className="text-xs text-slate-400">Default target value to use:</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {targetIds.length > 0 ? (
+                        <select
+                          value={selected.fallbackDefaultId ?? ''}
+                          onChange={e => {
+                            const opt = targetIds.find(o => o.id === e.target.value);
+                            const updated = { ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: opt?.label };
+                            persist(tables.map(t => t.id === selected.id ? updated : t));
+                            setSelected(updated);
+                          }}
+                          className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 min-w-[220px]"
+                        >
+                          <option value="">— pick a target ID —</option>
+                          {targetIds.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                        </select>
+                      ) : (
+                        <input type="text"
+                          value={selected.fallbackDefaultId ?? ''}
+                          onChange={e => {
+                            const updated = { ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: undefined };
+                            persist(tables.map(t => t.id === selected.id ? updated : t));
+                            setSelected(updated);
+                          }}
+                          placeholder="type a target ID…"
+                          className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 font-mono w-48 placeholder:text-slate-600" />
+                      )}
+                      {selected.fallbackDefaultId && (
+                        <span className="text-xs text-emerald-400">
+                          → {selected.fallbackDefaultId}{selected.fallbackDefaultLabel ? ` (${selected.fallbackDefaultLabel})` : ''}
+                        </span>
+                      )}
+                      {targetIds.length === 0 && (
+                        <span className="text-xs text-slate-500">
+                          or load target IDs above to pick from a list
+                        </span>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
