@@ -173,6 +173,9 @@ export default function ImportPage() {
   const [previewIdx, setPreviewIdx]   = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
+  const [sqlTableName, setSqlTableName] = useState('item_laundry');
+  const [sqlUpsert, setSqlUpsert]       = useState(true);
+
   const abortRef   = useRef(false);
   const fileRef     = useRef<HTMLInputElement>(null);
   const pendingRef  = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -397,6 +400,92 @@ export default function ImportPage() {
     setDone(true);
   };
 
+  const generateSQL = () => {
+    if (rows.length === 0) return;
+
+    // CSV column → DB column mapping
+    // Nested-id fields: value is item.field.id in the payload
+    // Plain fields: value is item.field directly
+    const sqlNull = 'NULL';
+    const sqlInt = (v: unknown): string => {
+      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
+      const n = parseInt(String(v), 10);
+      return isNaN(n) ? sqlNull : String(n);
+    };
+    const sqlDate = (v: unknown): string => {
+      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
+      const s = String(v).trim();
+      return s ? `'${s.replace(/'/g, "''")}'` : sqlNull;
+    };
+    const nestedId = (item: Record<string, unknown>, field: string): string => {
+      const val = item[field];
+      if (!val || typeof val !== 'object') return sqlNull;
+      return sqlInt((val as Record<string, unknown>).id);
+    };
+
+    const DB_COLS = [
+      'id', 'encodingdate', 'firstseendate', 'lastseendate', 'washnigcycleseed',
+      'category_id', 'lastmovementtypeid', 'lastreportlocationid',
+      'lastlocationid', 'lastseenworkstationid', 'hs', 'killed', 'reformed',
+    ];
+
+    const valueRows: string[] = [];
+    let skipped = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const { payload, errors } = previewPayloads[i];
+      if (errors.length > 0) { skipped++; continue; }
+      const item = (payload.item ?? {}) as Record<string, unknown>;
+      valueRows.push([
+        sqlInt(item.id),
+        sqlDate(item.encodingDate),
+        sqlDate(item.firstSeenDate),
+        sqlDate(item.lastSeenDate),
+        sqlInt(item.washingCycleSeed),
+        nestedId(item, 'category'),
+        nestedId(item, 'lastMovementType'),
+        nestedId(item, 'lastReportLocation'),
+        nestedId(item, 'lastSeenLocation'),
+        nestedId(item, 'lastSeenWorkstation'),
+        'false', 'false', 'false', // hs, killed, reformed
+      ].join(', '));
+    }
+
+    if (valueRows.length === 0) { alert('No valid rows to export (all have conversion errors).'); return; }
+
+    const colList = DB_COLS.join(', ');
+    const conflictCols = DB_COLS.filter(c => c !== 'id').map(c => `  ${c} = EXCLUDED.${c}`).join(',\n');
+    const BATCH = 500;
+    const lines: string[] = [
+      `-- UbiLaundry item import`,
+      `-- Generated : ${new Date().toISOString()}`,
+      `-- Source    : ${fileName}`,
+      `-- Rows      : ${valueRows.length}${skipped > 0 ? ` (${skipped} skipped — conversion errors)` : ''}`,
+      '',
+    ];
+
+    for (let b = 0; b < valueRows.length; b += BATCH) {
+      const batch = valueRows.slice(b, b + BATCH);
+      lines.push(`INSERT INTO ${sqlTableName || 'item_laundry'} (${colList})`);
+      lines.push('VALUES');
+      lines.push(batch.map((v, idx) => `  (${v})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
+      if (sqlUpsert) {
+        lines.push('ON CONFLICT (id) DO UPDATE SET');
+        lines.push(conflictCols);
+      }
+      lines.push(';');
+      lines.push('');
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `ubilaundry-import-${new Date().toISOString().slice(0, 10)}.sql`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const toggleExpand = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
 
   const counts    = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);
@@ -475,6 +564,28 @@ export default function ImportPage() {
                   <input type="checkbox" checked={returnValue} onChange={e => setReturnValue(e.target.checked)} className="accent-blue-500 w-4 h-4" />
                   <span className="text-sm text-slate-300">Return value</span>
                   <span className="text-xs text-slate-500">(include item in response)</span>
+                </label>
+              </div>
+            </div>
+
+            {/* SQL Export options */}
+            <div className="bg-slate-800 border border-slate-700 rounded-lg px-5 py-4">
+              <h2 className="text-sm font-semibold text-slate-300 mb-3">SQL Export</h2>
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Table name</label>
+                  <input
+                    type="text"
+                    value={sqlTableName}
+                    onChange={e => setSqlTableName(e.target.value)}
+                    placeholder="item_laundry"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-40 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                  />
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={sqlUpsert} onChange={e => setSqlUpsert(e.target.checked)} className="accent-blue-500 w-4 h-4" />
+                  <span className="text-sm text-slate-300">ON CONFLICT DO UPDATE</span>
+                  <span className="text-xs text-slate-500">(upsert — safe to re-run)</span>
                 </label>
               </div>
             </div>
@@ -569,6 +680,15 @@ export default function ImportPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                   </svg>
                   Preview payloads
+                </button>
+                <button
+                  onClick={generateSQL}
+                  className="flex items-center gap-2 bg-slate-700 hover:bg-emerald-800 text-emerald-300 font-medium px-5 py-2.5 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Download SQL
                 </button>
                 <button
                   onClick={runImport}
