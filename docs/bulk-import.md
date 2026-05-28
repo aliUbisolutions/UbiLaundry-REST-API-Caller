@@ -96,7 +96,7 @@ Instead of calling the API, you can download a ready-to-run PostgreSQL `.sql` fi
 | `category` | `category_id` |
 | `lastMovementType` | `lastmovementtypeid` |
 | `lastReportLocation` | `lastreportlocationid` |
-| `lastSeenLocation` | `lastlocationid` |
+| `lastSeenLocation` | `lastseenlocationid` |
 | `lastSeenWorkstation` | `lastseenworkstationid` |
 | *(hardcoded)* | `hs = false`, `killed = false`, `reformed = false` |
 

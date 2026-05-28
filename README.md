@@ -131,6 +131,7 @@ The `/api/proxy` server route forwards requests to the UbiLaundry server so that
 
 | Version | Changes |
 |---|---|
+| 1.8.8 | Fix `lastseenlocationid` column name typo in SQL export |
 | 1.8.7 | Fix `washingcycleseed` column name typo in SQL export |
 | 1.8.6 | Skip trailing empty Excel rows in import and SQL export |
 | 1.8.5 | Always quote item id as string in SQL export |
