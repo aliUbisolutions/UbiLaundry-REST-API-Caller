@@ -324,6 +324,79 @@ export default function ImportPage() {
     if (fileRef.current) fileRef.current.value = '';
   };
 
+  const retryFailed = async () => {
+    const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
+    if (failedIndices.length === 0) return;
+    if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
+
+    abortRef.current = false;
+    setRunning(true);
+    setDone(false);
+    setExpandedIdx(null);
+    setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
+
+    const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
+    const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+
+    pendingRef.current.clear();
+    const update = (index: number, patch: Partial<RowResult>) => {
+      const prev = pendingRef.current.get(index) ?? {};
+      pendingRef.current.set(index, { ...prev, ...patch });
+    };
+    const flush = () => {
+      if (pendingRef.current.size === 0) return;
+      const snapshot = new Map(pendingRef.current);
+      pendingRef.current.clear();
+      setResults(prev => prev.map((r, i) => { const p = snapshot.get(i); return p ? { ...r, ...p } : r; }));
+    };
+    const interval = setInterval(flush, 200);
+
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const pos = cursor++;
+        if (pos >= failedIndices.length) break;
+        const idx = failedIndices[pos];
+        if (abortRef.current) { update(idx, { status: 'error', message: 'Cancelled' }); continue; }
+        const row = rows[idx];
+        if (!row.id || String(row.id).trim() === '') { update(idx, { status: 'skipped', message: 'Missing id' }); continue; }
+        update(idx, { status: 'running' });
+        const { payload, errors: convErrors } = previewPayloads[idx];
+        if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join('; '), payload }); continue; }
+        try {
+          const t0 = Date.now();
+          const res = await fetch('/api/proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
+          });
+          const data = await res.json();
+          const elapsed = Date.now() - t0;
+          if (data.error) {
+            update(idx, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
+          } else if (data.status >= 200 && data.status < 300) {
+            update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+          } else {
+            const body = data.body;
+            const msg = body && typeof body === 'object'
+              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
+              : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
+          }
+        } catch (err: unknown) {
+          update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, failedIndices.length) }, () => worker()));
+    clearInterval(interval);
+    flush();
+    setRunning(false);
+    setDone(true);
+  };
+
   const toggleExpand = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
 
   const counts    = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);
@@ -524,6 +597,11 @@ export default function ImportPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       {running && <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded">Stop</button>}
+                      {done && (counts.error ?? 0) > 0 && (
+                        <button onClick={retryFailed} className="text-xs text-orange-400 hover:text-orange-300 px-3 py-1 border border-orange-400/30 rounded transition-colors">
+                          Retry {counts.error} failed
+                        </button>
+                      )}
                       {done && <button onClick={reset} className="text-xs text-slate-400 hover:text-white px-3 py-1 border border-slate-600 rounded">New import</button>}
                     </div>
                   </div>

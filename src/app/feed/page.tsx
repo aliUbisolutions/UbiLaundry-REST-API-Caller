@@ -260,6 +260,79 @@ export default function FeedPage() {
     if (fileRef.current) fileRef.current.value = '';
   };
 
+  const retryFailed = async () => {
+    const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
+    if (failedIndices.length === 0 || !endpoint) return;
+    if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
+
+    abortRef.current = false;
+    setRunning(true);
+    setDone(false);
+    setExpandedIdx(null);
+    setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
+
+    const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+
+    pendingRef.current.clear();
+    const update = (i: number, patch: Partial<RowResult>) => {
+      const prev = pendingRef.current.get(i) ?? {};
+      pendingRef.current.set(i, { ...prev, ...patch });
+    };
+    const flush = () => {
+      if (pendingRef.current.size === 0) return;
+      const snapshot = new Map(pendingRef.current);
+      pendingRef.current.clear();
+      setResults(prev => prev.map((r, idx) => { const p = snapshot.get(idx); return p ? { ...r, ...p } : r; }));
+    };
+    const interval = setInterval(flush, 200);
+
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const pos = cursor++;
+        if (pos >= failedIndices.length) break;
+        const idx = failedIndices[pos];
+        if (abortRef.current) { update(idx, { status: 'error', message: 'Cancelled' }); continue; }
+        update(idx, { status: 'running' });
+        try {
+          const { payload: finalJson, errors: convErrors, notes: convNotes } = previewPayloads[idx];
+          if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join(' | '), payload: finalJson }); continue; }
+          const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
+          const t0 = Date.now();
+          const res = await fetch('/api/proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson) }),
+          });
+          const data = await res.json();
+          const elapsed = Date.now() - t0;
+          if (data.error) {
+            update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
+          } else if (data.status >= 200 && data.status < 300) {
+            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+          } else {
+            const body = data.body;
+            const msg = body && typeof body === 'object'
+              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
+              : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
+          }
+        } catch (err: unknown) {
+          update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: 3 }, () => worker()));
+    clearInterval(interval);
+    flush();
+    setRunning(false);
+    setDone(true);
+  };
+
   const runFeed = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (!endpoint || rows.length === 0) return;
@@ -628,6 +701,11 @@ export default function FeedPage() {
                       {running && (
                         <button onClick={() => { abortRef.current = true; }} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded transition-colors">
                           Stop
+                        </button>
+                      )}
+                      {done && (counts.error ?? 0) > 0 && (
+                        <button onClick={retryFailed} className="text-xs text-orange-400 hover:text-orange-300 px-3 py-1 border border-orange-400/30 rounded transition-colors">
+                          Retry {counts.error} failed
                         </button>
                       )}
                       {done && (
