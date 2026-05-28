@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   loadEnvironments, loadConversionTables, saveConversionTables,
@@ -53,6 +53,7 @@ export default function ConversionsPage() {
   const [targetIds, setTargetIds]     = useState<IdOption[]>([]);
   const [loadingIds, setLoadingIds]   = useState<'source' | 'target' | null>(null);
   const [loadError, setLoadError]     = useState('');
+  const [sortBy, setSortBy]           = useState<'id' | 'name'>('id');
 
   useEffect(() => {
     setEnvs(loadEnvironments());
@@ -148,6 +149,18 @@ export default function ConversionsPage() {
   };
 
   const envName = (id: string) => envs.find(e => e.id === id)?.name ?? id;
+
+  const sortedSourceIds = useMemo(() => [...sourceIds].sort((a, b) =>
+    sortBy === 'name'
+      ? (a.label.split(' — ')[1] ?? a.label).localeCompare(b.label.split(' — ')[1] ?? b.label)
+      : Number(a.id) - Number(b.id) || a.id.localeCompare(b.id)
+  ), [sourceIds, sortBy]);
+
+  const sortedTargetIds = useMemo(() => [...targetIds].sort((a, b) =>
+    sortBy === 'name'
+      ? (a.label.split(' — ')[1] ?? a.label).localeCompare(b.label.split(' — ')[1] ?? b.label)
+      : Number(a.id) - Number(b.id) || a.id.localeCompare(b.id)
+  ), [targetIds, sortBy]);
 
   const commitName = () => {
     if (!selected || editingName === null) return;
@@ -326,9 +339,20 @@ export default function ConversionsPage() {
                 </div>
                 {loadError && <p className="text-red-400 text-xs">{loadError}</p>}
                 {(sourceIds.length > 0 || targetIds.length > 0) && (
-                  <div className="flex gap-4 text-xs text-slate-400">
+                  <div className="flex items-center gap-4 text-xs text-slate-400">
                     {sourceIds.length > 0 && <span className="text-blue-300">{sourceIds.length} source IDs loaded</span>}
                     {targetIds.length > 0 && <span className="text-emerald-300">{targetIds.length} target IDs loaded</span>}
+                    <div className="ml-auto flex items-center gap-1">
+                      <span className="text-slate-500">Sort by:</span>
+                      <button
+                        onClick={() => setSortBy('id')}
+                        className={`px-2 py-0.5 rounded transition-colors ${sortBy === 'id' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-white'}`}
+                      >ID</button>
+                      <button
+                        onClick={() => setSortBy('name')}
+                        className={`px-2 py-0.5 rounded transition-colors ${sortBy === 'name' ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-white'}`}
+                      >Name</button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -376,7 +400,7 @@ export default function ConversionsPage() {
                           className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 min-w-[220px]"
                         >
                           <option value="">— pick a target ID —</option>
-                          {targetIds.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                          {sortedTargetIds.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
                         </select>
                       ) : (
                         <input type="text"
@@ -427,7 +451,7 @@ export default function ConversionsPage() {
                             <select value={m.sourceId} onChange={e => updateMapping(i, 'sourceId', e.target.value)}
                               className="bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
                               <option value="">— select —</option>
-                              {sourceIds.map(opt => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                              {sortedSourceIds.map(opt => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                             </select>
                           ) : (
                             <input type="text" value={m.sourceId} onChange={e => updateMapping(i, 'sourceId', e.target.value)}
@@ -439,7 +463,7 @@ export default function ConversionsPage() {
                             <select value={m.targetId} onChange={e => updateMapping(i, 'targetId', e.target.value)}
                               className="bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
                               <option value="">— select —</option>
-                              {targetIds.map(opt => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
+                              {sortedTargetIds.map(opt => <option key={opt.id} value={opt.id}>{opt.label}</option>)}
                             </select>
                           ) : (
                             <input type="text" value={m.targetId} onChange={e => updateMapping(i, 'targetId', e.target.value)}
