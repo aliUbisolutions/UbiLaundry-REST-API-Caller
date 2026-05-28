@@ -437,7 +437,7 @@ export default function ImportPage() {
     };
 
     const DB_COLS = [
-      'id', 'encodingdate', 'firstseendate', 'lastseendate', 'washnigcycleseed',
+      'id', 'encodingdate', 'firstseendate', 'lastseendate', 'washingcycleseed',
       'category_id', 'lastmovementtypeid', 'lastreportlocationid',
       'lastlocationid', 'lastseenworkstationid', 'hs', 'killed', 'reformed',
     ];
