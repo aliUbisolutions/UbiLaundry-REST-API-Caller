@@ -413,6 +413,15 @@ export default function ImportPage() {
       const n = parseInt(String(v), 10);
       return isNaN(n) ? sqlNull : String(n);
     };
+    // For the item id: numeric → unquoted integer, anything else → quoted string
+    const sqlId = (v: unknown): string => {
+      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
+      const s = String(v).trim();
+      if (!s) return sqlNull;
+      const n = parseInt(s, 10);
+      if (!isNaN(n) && String(n) === s) return s; // clean integer
+      return `'${s.replace(/'/g, "''")}'`;         // string (EPC, UUID, etc.)
+    };
     const sqlDate = (v: unknown): string => {
       if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
       const s = String(v).trim();
@@ -431,14 +440,17 @@ export default function ImportPage() {
     ];
 
     const valueRows: string[] = [];
+    const idValues:  string[] = []; // tracked separately for the subclass table
     let skipped = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const { payload, errors } = previewPayloads[i];
       if (errors.length > 0) { skipped++; continue; }
       const item = (payload.item ?? {}) as Record<string, unknown>;
+      const id = sqlId(item.id);
+      idValues.push(id);
       valueRows.push([
-        sqlInt(item.id),
+        id,
         sqlDate(item.encodingDate),
         sqlDate(item.firstSeenDate),
         sqlDate(item.lastSeenDate),
@@ -482,12 +494,11 @@ export default function ImportPage() {
     // Block 2 — subclass table (id only)
     if (sqlSubTableName.trim()) {
       const subName = sqlSubTableName.trim();
-      for (let b = 0; b < valueRows.length; b += BATCH) {
-        const batch = valueRows.slice(b, b + BATCH);
+      for (let b = 0; b < idValues.length; b += BATCH) {
+        const batch = idValues.slice(b, b + BATCH);
         lines.push(`INSERT INTO ${subName} (id)`);
         lines.push('VALUES');
-        // id is the first value in each row
-        lines.push(batch.map((v, idx) => `  (${v.split(',')[0].trim()})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
+        lines.push(batch.map((v, idx) => `  (${v})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
         lines.push('ON CONFLICT (id) DO NOTHING;');
         lines.push('');
       }
