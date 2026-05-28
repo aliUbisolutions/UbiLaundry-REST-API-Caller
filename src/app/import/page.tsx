@@ -173,8 +173,9 @@ export default function ImportPage() {
   const [previewIdx, setPreviewIdx]   = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
-  const [sqlTableName, setSqlTableName] = useState('item_laundry');
-  const [sqlUpsert, setSqlUpsert]       = useState(true);
+  const [sqlTableName, setSqlTableName]           = useState('item');
+  const [sqlSubTableName, setSqlSubTableName]     = useState('item_laundry');
+  const [sqlUpsert, setSqlUpsert]                 = useState(true);
 
   const abortRef   = useRef(false);
   const fileRef     = useRef<HTMLInputElement>(null);
@@ -464,9 +465,10 @@ export default function ImportPage() {
       '',
     ];
 
+    // Block 1 — main table
     for (let b = 0; b < valueRows.length; b += BATCH) {
       const batch = valueRows.slice(b, b + BATCH);
-      lines.push(`INSERT INTO ${sqlTableName || 'item_laundry'} (${colList})`);
+      lines.push(`INSERT INTO ${sqlTableName || 'item'} (${colList})`);
       lines.push('VALUES');
       lines.push(batch.map((v, idx) => `  (${v})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
       if (sqlUpsert) {
@@ -475,6 +477,20 @@ export default function ImportPage() {
       }
       lines.push(';');
       lines.push('');
+    }
+
+    // Block 2 — subclass table (id only)
+    if (sqlSubTableName.trim()) {
+      const subName = sqlSubTableName.trim();
+      for (let b = 0; b < valueRows.length; b += BATCH) {
+        const batch = valueRows.slice(b, b + BATCH);
+        lines.push(`INSERT INTO ${subName} (id)`);
+        lines.push('VALUES');
+        // id is the first value in each row
+        lines.push(batch.map((v, idx) => `  (${v.split(',')[0].trim()})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
+        lines.push('ON CONFLICT (id) DO NOTHING;');
+        lines.push('');
+      }
     }
 
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
@@ -573,14 +589,25 @@ export default function ImportPage() {
               <h2 className="text-sm font-semibold text-slate-300 mb-3">SQL Export</h2>
               <div className="flex flex-wrap items-center gap-4">
                 <div className="flex items-center gap-2">
-                  <label className="text-xs text-slate-400 shrink-0">Table name</label>
+                  <label className="text-xs text-slate-400 shrink-0">Main table</label>
                   <input
                     type="text"
                     value={sqlTableName}
                     onChange={e => setSqlTableName(e.target.value)}
-                    placeholder="item_laundry"
-                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-40 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                    placeholder="item"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-36 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
                   />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Subclass table</label>
+                  <input
+                    type="text"
+                    value={sqlSubTableName}
+                    onChange={e => setSqlSubTableName(e.target.value)}
+                    placeholder="item_laundry"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-36 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                  />
+                  <span className="text-xs text-slate-600">(id only)</span>
                 </div>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={sqlUpsert} onChange={e => setSqlUpsert(e.target.checked)} className="accent-blue-500 w-4 h-4" />
