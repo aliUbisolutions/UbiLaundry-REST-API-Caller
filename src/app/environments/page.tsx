@@ -1,14 +1,22 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import {
   loadEnvironments, saveEnvironments, saveActiveConfig,
-  genId, type Environment,
+  loadConversionTables, saveConversionTables,
+  genId, type Environment, type ConversionTable,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
 
 const EMPTY: Omit<Environment, 'id'> = { name: '', baseUrl: '', username: '', password: '' };
+
+interface ConfigBundle {
+  version: string;
+  exportedAt: string;
+  environments: Environment[];
+  conversionTables: ConversionTable[];
+}
 
 export default function EnvironmentsPage() {
   const [envs, setEnvs]       = useState<Environment[]>([]);
@@ -16,6 +24,11 @@ export default function EnvironmentsPage() {
   const [isNew, setIsNew]     = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+
+  // Import state
+  const [importBundle, setImportBundle] = useState<ConfigBundle | null>(null);
+  const [importError, setImportError]   = useState('');
+  const importFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setEnvs(loadEnvironments()); }, []);
 
@@ -53,6 +66,79 @@ export default function EnvironmentsPage() {
     } finally { setTesting(null); }
   };
 
+  // ─── Export ───────────────────────────────────────────────────────────────
+
+  const exportConfig = () => {
+    const bundle: ConfigBundle = {
+      version: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      environments: loadEnvironments(),
+      conversionTables: loadConversionTables(),
+    };
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `ubilaundry-config-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ─── Import ───────────────────────────────────────────────────────────────
+
+  const onImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const parsed = JSON.parse(ev.target?.result as string);
+        if (!Array.isArray(parsed.environments) || !Array.isArray(parsed.conversionTables))
+          throw new Error('Invalid file: missing environments or conversionTables arrays.');
+        setImportError('');
+        setImportBundle(parsed as ConfigBundle);
+      } catch (err: unknown) {
+        setImportError(err instanceof Error ? err.message : 'Failed to parse file.');
+        setImportBundle(null);
+      }
+      if (importFileRef.current) importFileRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const applyImport = (mode: 'merge' | 'replace') => {
+    if (!importBundle) return;
+
+    if (mode === 'replace') {
+      if (!confirm(`This will overwrite all current environments and conversion tables. Continue?`)) return;
+      saveEnvironments(importBundle.environments);
+      saveConversionTables(importBundle.conversionTables);
+      setEnvs(importBundle.environments);
+    } else {
+      // Merge: assign fresh IDs to everything; remap env refs in tables
+      const idMap = new Map<string, string>();
+      const newEnvs = importBundle.environments.map(e => {
+        const newId = genId();
+        idMap.set(e.id, newId);
+        return { ...e, id: newId };
+      });
+      const newTables = importBundle.conversionTables.map(t => ({
+        ...t,
+        id: genId(),
+        sourceEnvId: idMap.get(t.sourceEnvId) ?? t.sourceEnvId,
+        targetEnvId: idMap.get(t.targetEnvId) ?? t.targetEnvId,
+      }));
+
+      const mergedEnvs    = [...loadEnvironments(), ...newEnvs];
+      const mergedTables  = [...loadConversionTables(), ...newTables];
+      saveEnvironments(mergedEnvs);
+      saveConversionTables(mergedTables);
+      setEnvs(mergedEnvs);
+    }
+
+    setImportBundle(null);
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 text-white">
       <div className="bg-slate-800 border-b border-slate-700 px-5 py-3 flex items-center gap-4">
@@ -64,11 +150,37 @@ export default function EnvironmentsPage() {
         <h1 className="text-white font-semibold text-sm">Environments</h1>
         <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
+
+        {/* Import */}
+        <input ref={importFileRef} type="file" accept=".json" className="hidden" onChange={onImportFile} />
+        <button
+          onClick={() => importFileRef.current?.click()}
+          className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+          Import
+        </button>
+
+        {/* Export */}
+        <button
+          onClick={exportConfig}
+          className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Export
+        </button>
+
         <button onClick={openNew} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
           New environment
         </button>
       </div>
+
+      {importError && (
+        <div className="max-w-3xl mx-auto px-5 pt-4">
+          <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/30 rounded px-4 py-2">{importError}</p>
+        </div>
+      )}
 
       <div className="max-w-3xl mx-auto px-5 py-8">
         {envs.length === 0 ? (
@@ -150,6 +262,64 @@ export default function EnvironmentsPage() {
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded transition-colors">
                 {isNew ? 'Create' : 'Update'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Import preview modal */}
+      {importBundle && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-lg">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700">
+              <h2 className="text-white font-semibold">Import configuration</h2>
+              <button onClick={() => setImportBundle(null)} className="text-slate-400 hover:text-white">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* File summary */}
+              <div className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 space-y-1 text-sm">
+                {importBundle.exportedAt && (
+                  <p className="text-slate-500 text-xs">Exported {new Date(importBundle.exportedAt).toLocaleString()} · v{importBundle.version}</p>
+                )}
+                <p className="text-white">
+                  <span className="font-semibold text-blue-300">{importBundle.environments.length}</span> environment{importBundle.environments.length !== 1 ? 's' : ''}
+                  {importBundle.environments.length > 0 && (
+                    <span className="text-slate-500 ml-2 text-xs">{importBundle.environments.map(e => e.name).join(', ')}</span>
+                  )}
+                </p>
+                <p className="text-white">
+                  <span className="font-semibold text-emerald-300">{importBundle.conversionTables.length}</span> conversion table{importBundle.conversionTables.length !== 1 ? 's' : ''}
+                  {importBundle.conversionTables.length > 0 && (
+                    <span className="text-slate-500 ml-2 text-xs">{importBundle.conversionTables.map(t => t.name).join(', ')}</span>
+                  )}
+                </p>
+              </div>
+
+              {/* Mode choice */}
+              <p className="text-slate-400 text-xs">How do you want to apply this?</p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => applyImport('merge')}
+                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg transition-colors"
+                >
+                  <p className="text-white text-sm font-medium">Merge — add alongside existing</p>
+                  <p className="text-slate-400 text-xs mt-0.5">All imported items are added as new entries. Nothing is deleted. Conversion table references are remapped to the new environment IDs.</p>
+                </button>
+                <button
+                  onClick={() => applyImport('replace')}
+                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-red-900/30 border border-slate-600 hover:border-red-500/40 rounded-lg transition-colors"
+                >
+                  <p className="text-red-300 text-sm font-medium">Replace — overwrite everything</p>
+                  <p className="text-slate-400 text-xs mt-0.5">All current environments and conversion tables are replaced. This cannot be undone.</p>
+                </button>
+              </div>
+            </div>
+
+            <div className="px-5 pb-5 flex justify-end">
+              <button onClick={() => setImportBundle(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
             </div>
           </div>
         </div>
