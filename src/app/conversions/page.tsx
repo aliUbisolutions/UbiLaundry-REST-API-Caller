@@ -148,6 +148,22 @@ export default function ConversionsPage() {
     setSelected(updated);
   };
 
+  const populateFrom = (side: 'source' | 'target') => {
+    if (!selected) return;
+    const ids = side === 'source' ? sourceIds : targetIds;
+    if (ids.length === 0) return;
+    if (selected.mappings.length > 0 && !confirm(`This will replace the ${selected.mappings.length} existing mapping(s). Continue?`)) return;
+    const newMappings: ConversionMapping[] = ids.map(opt => {
+      const label = opt.label.split(' — ')[1] ?? undefined;
+      return side === 'source'
+        ? { sourceId: opt.id, targetId: '', label }
+        : { sourceId: '', targetId: opt.id, label };
+    });
+    const updated = { ...selected, mappings: newMappings };
+    persist(tables.map(t => t.id === selected.id ? updated : t));
+    setSelected(updated);
+  };
+
   const envName = (id: string) => envs.find(e => e.id === id)?.name ?? id;
 
   const sortedSourceIds = useMemo(() => [...sourceIds].sort((a, b) =>
@@ -331,6 +347,16 @@ export default function ConversionsPage() {
                     className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white rounded transition-colors">
                     {loadingIds === 'target' ? '…' : `Load from ${envName(selected.targetEnvId)}`}
                   </button>
+                  {sourceIds.length > 0 && (
+                    <button onClick={() => populateFrom('source')} className="text-xs px-3 py-1.5 bg-blue-900 hover:bg-blue-800 text-blue-200 rounded transition-colors">
+                      Populate from {envName(selected.sourceEnvId)}
+                    </button>
+                  )}
+                  {targetIds.length > 0 && (
+                    <button onClick={() => populateFrom('target')} className="text-xs px-3 py-1.5 bg-slate-600 hover:bg-slate-500 text-emerald-200 rounded transition-colors">
+                      Populate from {envName(selected.targetEnvId)}
+                    </button>
+                  )}
                   {sourceIds.length > 0 && targetIds.length > 0 && (
                     <button onClick={autoMatch} className="text-xs px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded transition-colors">
                       Auto-match by name
