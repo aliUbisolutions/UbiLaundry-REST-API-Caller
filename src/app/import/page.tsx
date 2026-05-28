@@ -114,7 +114,13 @@ function parseFile(file: File): Promise<Row[]> {
             cleaned[k] = v;
           }
           return cleaned as Row;
-        }).filter((r) => r.id && String(r.id).trim() !== '');
+        }).filter((r) => {
+          if (!r.id || String(r.id).trim() === '') return false;
+          // Require at least one data field besides id to be non-empty
+          return Object.entries(r).some(
+            ([k, v]) => k !== 'id' && v !== '' && v !== null && v !== undefined
+          );
+        });
         resolve(rows);
       } catch (err) { reject(err); }
     };
@@ -445,6 +451,7 @@ export default function ImportPage() {
       if (errors.length > 0) { skipped++; continue; }
       const item = (payload.item ?? {}) as Record<string, unknown>;
       const id = sqlId(item.id);
+      if (id === sqlNull) { skipped++; continue; } // no id → skip
       idValues.push(id);
       valueRows.push([
         id,
