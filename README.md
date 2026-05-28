@@ -68,6 +68,8 @@ Upload a CSV or Excel file where each row represents an item to assign. The page
 3. Optionally applies **Conversion Tables** to translate IDs from a source environment
 4. Shows a **Preview Payloads** panel before sending
 5. Sends requests in parallel (3 workers) and displays only error rows after completion
+6. Offers a **Retry failed** button to re-send only the failed rows
+7. Can generate a **PostgreSQL SQL script** instead of calling the API — useful for large files
 
 → [Detailed documentation](docs/bulk-import.md)
 
@@ -129,6 +131,16 @@ The `/api/proxy` server route forwards requests to the UbiLaundry server so that
 
 | Version | Changes |
 |---|---|
+| 1.8.7 | Fix `washingcycleseed` column name typo in SQL export |
+| 1.8.6 | Skip trailing empty Excel rows in import and SQL export |
+| 1.8.5 | Always quote item id as string in SQL export |
+| 1.8.4 | Fix non-numeric (EPC/RFID) item IDs appearing as NULL in SQL export |
+| 1.8.3 | SQL export: add subclass table (`item_laundry`) INSERT block |
+| 1.8.2 | SQL export: download PostgreSQL script from import page |
+| 1.8.1 | Retry failed rows on import and feed pages |
+| 1.8.0 | Export / import configuration bundle (environments + conversion tables) |
+| 1.7.3 | Populate conversion table from source or target environment |
+| 1.7.2 | Sort loaded IDs by ID or name in conversion table editor |
 | 1.7.1 | Inline rename for conversion tables |
 | 1.7.0 | Results tables show error rows only (performance) |
 | 1.6.0 | Conversion table fallback strategies (error / default / keep-source) |

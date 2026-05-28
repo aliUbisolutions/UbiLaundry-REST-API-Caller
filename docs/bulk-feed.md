@@ -43,7 +43,7 @@ Appears when more than one environment is saved. Select a source environment and
 - **Preview payloads** — inspect the exact JSON for every row before sending.
 - **Send N rows** — starts sending with 3 parallel workers.
 
-After completion, only error rows are displayed. Each error row is expandable to show the full request payload and server response.
+After completion, only error rows are displayed. Each error row is expandable to show the full request payload and server response. A **Retry N failed** button re-sends only the failed rows without touching successful ones.
 
 ## Type coercion
 

@@ -29,6 +29,23 @@ Opens the edit modal to update any field. Changes are saved to `localStorage`.
 
 Removes the environment from `localStorage`. This does not affect the currently active configuration unless you explicitly activate a different environment.
 
+## Export / Import
+
+The **Export** and **Import** buttons in the top bar let you move all environments (and conversion tables) between installations.
+
+### Export
+
+Downloads a single JSON file containing all environments and all conversion tables, plus a timestamp and version number.
+
+### Import
+
+Reads a JSON bundle and shows a preview (number of environments and tables, with their names) before applying. Two modes:
+
+| Mode | Behaviour |
+|---|---|
+| **Merge** | Adds all imported items as new entries alongside existing data. Conversion table environment references are remapped to the new IDs automatically. Nothing is deleted. |
+| **Replace** | Overwrites all current environments and conversion tables. Asks for confirmation first. |
+
 ## Storage
 
 Environments are stored in `localStorage` under the key `ubilaundry-environments`. They are local to the browser and are not shared between users or devices.

@@ -53,10 +53,14 @@ The **Reassign** and **Return value** toggles at the top of the page control tho
 
 ## Workflow
 
-1. **Select source environment** (optional) — if your file contains IDs from a different environment, choose it here and select the conversion tables to apply.
-2. **Upload file** — drag-and-drop or click to browse.
-3. **Preview payloads** — click the Preview button to inspect the exact JSON that will be sent for each row, including any conversion applied. Rows with conversion errors are highlighted in red.
-4. **Send** — click **Import N rows**. A progress bar tracks completion. Only rows that fail are shown in the results table.
+1. **Upload file** — drag-and-drop or click to browse.
+2. **Import options** — toggle Reassign and Return value flags.
+3. **SQL Export options** — configure table names if you want to download a SQL script instead of calling the API (see below).
+4. **ID Conversion** (optional) — if your file contains IDs from a different environment, select the source environment and the conversion tables to apply.
+5. **Preview payloads** — inspect the exact JSON that will be sent for each row, including any conversion applied. Rows with conversion errors are highlighted in red.
+6. **Download SQL** or **Import N items** — see below.
+
+After completion, only error rows are shown. Each error row is expandable to show the request payload and server response. A **Retry N failed** button re-sends only the failed rows without touching successful ones.
 
 ## Conversion tables
 
@@ -67,6 +71,40 @@ If the IDs in your file come from a source environment that is different from th
 3. The conversion is applied to each row before the payload is built.
 
 Rows where a required ID has no mapping entry will fail according to the table's **fallback strategy** (error / use default / keep source value). See [Conversion Tables](conversion-tables.md).
+
+## SQL Export
+
+Instead of calling the API, you can download a ready-to-run PostgreSQL `.sql` file. This is faster for large files.
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| **Main table** | `item` | The parent table that receives all columns |
+| **Subclass table** | `item_laundry` | A joined-inheritance subclass table that receives only `id` |
+| **ON CONFLICT DO UPDATE** | on | Generates upsert statements — safe to re-run |
+
+### Column mapping
+
+| CSV column | DB column |
+|---|---|
+| `id` | `id` (always quoted as string) |
+| `encodingDate` | `encodingdate` |
+| `firstSeenDate` | `firstseendate` |
+| `lastSeenDate` | `lastseendate` |
+| `washingCycleSeed` | `washingcycleseed` |
+| `category` | `category_id` |
+| `lastMovementType` | `lastmovementtypeid` |
+| `lastReportLocation` | `lastreportlocationid` |
+| `lastSeenLocation` | `lastlocationid` |
+| `lastSeenWorkstation` | `lastseenworkstationid` |
+| *(hardcoded)* | `hs = false`, `killed = false`, `reformed = false` |
+
+The script is split into 500-row `INSERT` batches. Rows with conversion errors and trailing empty Excel rows are excluded automatically.
+
+### Running the script
+
+Open the file in pgAdmin's **Query Tool** (File → Open) and press **F5**.
 
 ## Performance
 

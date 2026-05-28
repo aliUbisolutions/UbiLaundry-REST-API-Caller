@@ -40,9 +40,20 @@ In the editor panel:
 1. Select the entity type (Location, Category, etc.).
 2. Click **Load from [source env]** to fetch all IDs from the source server.
 3. Click **Load from [target env]** to fetch all IDs from the target server.
-4. Click **Auto-match by name** — the tool pairs entities that share the same name across the two environments.
 
-Review the auto-matched rows and correct any that could not be matched (target ID left blank).
+Once IDs are loaded, three actions become available:
+
+| Action | Description |
+|---|---|
+| **Populate from [source env]** | Creates one mapping row per source ID, target left blank. Good starting point when the source list is the reference. |
+| **Populate from [target env]** | Creates one mapping row per target ID, source left blank. |
+| **Auto-match by name** | Pairs source and target IDs that share the same name. Unmatched rows are left with a blank target. |
+
+If the table already has mappings, a confirmation prompt appears before overwriting.
+
+A **Sort by: ID / Name** toggle reorders the dropdowns in all mapping rows without re-fetching from the server.
+
+Review the rows and fill in any that could not be matched automatically.
 
 ## Fallback strategy
 
