@@ -413,14 +413,11 @@ export default function ImportPage() {
       const n = parseInt(String(v), 10);
       return isNaN(n) ? sqlNull : String(n);
     };
-    // For the item id: numeric → unquoted integer, anything else → quoted string
+    // item id is always a VARCHAR/TEXT column — always quote
     const sqlId = (v: unknown): string => {
       if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
       const s = String(v).trim();
-      if (!s) return sqlNull;
-      const n = parseInt(s, 10);
-      if (!isNaN(n) && String(n) === s) return s; // clean integer
-      return `'${s.replace(/'/g, "''")}'`;         // string (EPC, UUID, etc.)
+      return s ? `'${s.replace(/'/g, "''")}'` : sqlNull;
     };
     const sqlDate = (v: unknown): string => {
       if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
