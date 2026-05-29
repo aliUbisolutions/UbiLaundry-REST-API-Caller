@@ -99,13 +99,15 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
   return { item, reassign, returnValue };
 }
 
+const BATCH_SIZE = 50_000;
+
 function parseFile(file: File): Promise<Row[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = e.target?.result;
-        const wb = XLSX.read(data, { type: 'binary', raw: false, cellDates: false });
+        const data = e.target?.result as ArrayBuffer;
+        const wb = XLSX.read(data, { type: 'array', raw: false, cellDates: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
         const rows = raw.map((r) => {
@@ -117,7 +119,6 @@ function parseFile(file: File): Promise<Row[]> {
           return cleaned as Row;
         }).filter((r) => {
           if (!r.id || String(r.id).trim() === '') return false;
-          // Require at least one data field besides id to be non-empty
           return Object.entries(r).some(
             ([k, v]) => k !== 'id' && v !== '' && v !== null && v !== undefined
           );
@@ -126,7 +127,7 @@ function parseFile(file: File): Promise<Row[]> {
       } catch (err) { reject(err); }
     };
     reader.onerror = reject;
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   });
 }
 
@@ -162,7 +163,9 @@ export default function ImportPage() {
   const [envs] = useState<Environment[]>(() => loadEnvironments());
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
-  const [rows, setRows]           = useState<Row[]>([]);
+  const [allRows, setAllRows]      = useState<Row[]>([]);
+  const [currentBatch, setCurrentBatch] = useState(0);
+  const [parsing, setParsing]     = useState(false);
   const [results, setResults]     = useState<RowResult[]>([]);
   const [running, setRunning]     = useState(false);
   const [done, setDone]           = useState(false);
@@ -187,6 +190,12 @@ export default function ImportPage() {
   const abortRef   = useRef(false);
   const fileRef     = useRef<HTMLInputElement>(null);
   const pendingRef  = useRef<Map<number, Partial<RowResult>>>(new Map());
+
+  const rows = useMemo(
+    () => allRows.slice(currentBatch * BATCH_SIZE, (currentBatch + 1) * BATCH_SIZE),
+    [allRows, currentBatch]
+  );
+  const totalBatches = Math.ceil(allRows.length / BATCH_SIZE);
 
   const targetEnv = useMemo(() =>
     envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
@@ -219,19 +228,23 @@ export default function ImportPage() {
 
   const loadFile = useCallback(async (file: File) => {
     setParseError('');
-    setRows([]);
+    setAllRows([]);
+    setCurrentBatch(0);
     setResults([]);
     setDone(false);
     setFileName(file.name);
+    setParsing(true);
     try {
       const parsed = await parseFile(file);
       if (parsed.length === 0) {
         setParseError('No valid rows found. Make sure the file has an "id" column.');
         return;
       }
-      setRows(parsed);
+      setAllRows(parsed);
     } catch (err: unknown) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse file');
+    } finally {
+      setParsing(false);
     }
   }, []);
 
@@ -329,8 +342,17 @@ export default function ImportPage() {
   };
 
   const stop  = () => { abortRef.current = true; };
+
+  const switchBatch = (idx: number) => {
+    if (running) return;
+    setCurrentBatch(idx);
+    setResults([]);
+    setDone(false);
+    setExpandedIdx(null);
+  };
+
   const reset = () => {
-    setRows([]); setResults([]); setFileName(''); setParseError('');
+    setAllRows([]); setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
     if (fileRef.current) fileRef.current.value = '';
   };
@@ -550,21 +572,56 @@ export default function ImportPage() {
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          onClick={() => !rows.length && fileRef.current?.click()}
+          onClick={() => !allRows.length && !parsing && fileRef.current?.click()}
           className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer
             ${dragging ? 'border-blue-400 bg-blue-400/5' : rows.length ? 'border-slate-700 cursor-default' : 'border-slate-700 hover:border-slate-500'}`}
         >
           <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={onFileChange} />
-          {rows.length > 0 ? (
+          {parsing ? (
             <div className="flex items-center justify-center gap-3">
-              <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 animate-spin text-blue-400" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <div className="text-left">
+                <p className="text-white font-medium">{fileName}</p>
+                <p className="text-slate-400 text-sm">Parsing file…</p>
+              </div>
+            </div>
+          ) : rows.length > 0 ? (
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <svg className="w-8 h-8 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               <div className="text-left">
                 <p className="text-white font-medium">{fileName}</p>
-                <p className="text-slate-400 text-sm">{rows.length} rows ready to import</p>
+                {totalBatches > 1
+                  ? <p className="text-slate-400 text-sm">{allRows.length} rows — batch {currentBatch + 1} of {totalBatches} ({rows.length} rows)</p>
+                  : <p className="text-slate-400 text-sm">{rows.length} rows ready to import</p>
+                }
               </div>
-              <button onClick={(e) => { e.stopPropagation(); reset(); }} className="ml-4 text-slate-500 hover:text-red-400 transition-colors">
+              {totalBatches > 1 && (
+                <div className="flex items-center gap-1 ml-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); switchBatch(currentBatch - 1); }}
+                    disabled={currentBatch === 0 || running}
+                    className="p-1.5 rounded border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Previous batch"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/></svg>
+                  </button>
+                  <span className="text-xs text-slate-500 px-1">{currentBatch + 1}/{totalBatches}</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); switchBatch(currentBatch + 1); }}
+                    disabled={currentBatch >= totalBatches - 1 || running}
+                    className="p-1.5 rounded border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    title="Next batch"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7"/></svg>
+                  </button>
+                </div>
+              )}
+              <button onClick={(e) => { e.stopPropagation(); reset(); }} className="ml-2 text-slate-500 hover:text-red-400 transition-colors" title="Remove file">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
@@ -742,7 +799,9 @@ export default function ImportPage() {
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                   </svg>
-                  Import {rows.length} items
+                  {totalBatches > 1
+                    ? `Import batch ${currentBatch + 1}/${totalBatches} (${rows.length} items)`
+                    : `Import ${rows.length} items`}
                 </button>
               </div>
             )}
@@ -856,7 +915,7 @@ export default function ImportPage() {
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={runImport} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors">
-                  Import {rows.length} items
+                  {totalBatches > 1 ? `Import batch ${currentBatch + 1}/${totalBatches} (${rows.length})` : `Import ${rows.length} items`}
                 </button>
                 <button onClick={() => setShowPreview(false)} className="text-slate-400 hover:text-white p-1.5 rounded">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
