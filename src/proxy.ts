@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { verifyToken, JWT_COOKIE } from '@/lib/auth';
 
-const PUBLIC_PATHS = ['/login', '/setup', '/api/auth/login', '/api/auth/logout'];
+const PUBLIC_PATHS = ['/login', '/setup', '/api/auth/login', '/api/auth/logout', '/api/setup'];
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
