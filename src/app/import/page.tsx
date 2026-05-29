@@ -101,33 +101,100 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
 
 const BATCH_SIZE = 50_000;
 
+// ─── CSV parser (handles quoted fields, BOM, comma/semicolon/tab) ─────────────
+
+function detectSep(line: string): string {
+  // Count unquoted occurrences of each candidate separator
+  const candidates = [',', ';', '\t'];
+  let best = ',';
+  let bestCount = 0;
+  for (const sep of candidates) {
+    let count = 0; let inQ = false;
+    for (const ch of line) { if (ch === '"') inQ = !inQ; else if (!inQ && ch === sep) count++; }
+    if (count > bestCount) { bestCount = count; best = sep; }
+  }
+  return best;
+}
+
+function parseCSVRow(line: string, sep: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if (ch === sep && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+function cleanRow(raw: Record<string, unknown>): Row | null {
+  const r: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === '__EMPTY' || k === '') continue;
+    r[k] = v;
+  }
+  if (!r.id || String(r.id).trim() === '') return null;
+  if (!Object.entries(r).some(([k, v]) => k !== 'id' && v !== '' && v !== null && v !== undefined)) return null;
+  return r as Row;
+}
+
+function parseCSVText(text: string): Row[] {
+  const clean = text.startsWith('﻿') ? text.slice(1) : text;
+  const lines = clean.split(/\r?\n/);
+  if (lines.length < 2) return [];
+  const sep = detectSep(lines[0]);
+  const headers = parseCSVRow(lines[0], sep).map(h => h.trim().replace(/^"|"$/g, ''));
+  const rows: Row[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const values = parseCSVRow(line, sep);
+    const raw: Record<string, unknown> = {};
+    for (let j = 0; j < headers.length; j++) {
+      if (headers[j]) raw[headers[j]] = values[j] ?? '';
+    }
+    const row = cleanRow(raw);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+// ─── File parser (CSV → native text, Excel → XLSX) ───────────────────────────
+
 function parseFile(file: File): Promise<Row[]> {
+  const isCSV = /\.(csv|txt)$/i.test(file.name);
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const data = e.target?.result as ArrayBuffer;
-        const wb = XLSX.read(data, { type: 'array', raw: false, cellDates: false });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
-        const rows = raw.map((r) => {
-          const cleaned: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(r)) {
-            if (k === '__EMPTY' || k === '') continue;
-            cleaned[k] = v;
-          }
-          return cleaned as Row;
-        }).filter((r) => {
-          if (!r.id || String(r.id).trim() === '') return false;
-          return Object.entries(r).some(
-            ([k, v]) => k !== 'id' && v !== '' && v !== null && v !== undefined
-          );
-        });
-        resolve(rows);
-      } catch (err) { reject(err); }
-    };
-    reader.onerror = reject;
-    reader.readAsArrayBuffer(file);
+    if (isCSV) {
+      reader.onload = (e) => {
+        try { resolve(parseCSVText(e.target?.result as string)); }
+        catch (err) { reject(err); }
+      };
+      reader.onerror = reject;
+      reader.readAsText(file);
+    } else {
+      reader.onload = (e) => {
+        try {
+          const data = e.target?.result as ArrayBuffer;
+          const wb = XLSX.read(data, { type: 'array', raw: false, cellDates: false });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+          resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
+        } catch (err) { reject(err); }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    }
   });
 }
 
