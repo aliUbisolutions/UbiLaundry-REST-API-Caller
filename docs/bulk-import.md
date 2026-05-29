@@ -4,10 +4,14 @@ The `/import` page sends one assignment API call per row of a CSV or Excel file.
 
 ## Supported file formats
 
-- `.csv` (comma-separated)
+- `.csv` (comma-separated, semicolon-separated, or tab-separated — detected automatically)
 - `.xlsx` / `.xls` (Excel)
 
 The first row must be a header row. Each column header is used as a field name.
+
+### Large CSV files
+
+CSV files are read in streaming batches of 50,000 rows using `Blob.slice()`, so files with hundreds of thousands of rows load without running out of browser memory. Use the **← →** batch navigation buttons to move between batches and import each one in turn.
 
 ## Required columns
 
@@ -109,3 +113,5 @@ Open the file in pgAdmin's **Query Tool** (File → Open) and press **F5**.
 ## Performance
 
 Requests are sent with 3 parallel workers. The results table only renders error rows to keep the UI fast on large files. A summary line shows the total success count.
+
+For very large files, import one batch at a time using the batch navigation buttons. Each batch is independent — you can retry failed rows within a batch before moving to the next.

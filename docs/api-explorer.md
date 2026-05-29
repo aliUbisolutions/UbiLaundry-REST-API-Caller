@@ -30,3 +30,4 @@ The response panel shows:
 
 - All requests go through the `/api/proxy` server route to avoid browser CORS restrictions. The credentials are never sent to the browser — the proxy forwards them server-side.
 - The endpoint catalogue is defined in `src/lib/endpoints.ts`. To add a new endpoint, add an entry there and redeploy.
+- An admin can restrict which endpoints a user is allowed to see and call. Hidden endpoints do not appear in the sidebar. Attempts to call a restricted endpoint directly are rejected by the proxy with HTTP 403.

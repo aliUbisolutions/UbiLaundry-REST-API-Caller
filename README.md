@@ -8,8 +8,10 @@ A browser-based tool for calling UbiLaundry REST APIs — bulk imports, data fee
 
 | Feature | Description |
 |---|---|
+| **Authentication** | Admin account with login/setup flow; per-user access control |
+| **User Management** | Create users, restrict which API endpoints each user can see and call |
 | **API Explorer** | Browse and call any UbiLaundry endpoint from the home page |
-| **Bulk Assignment Import** | Upload a CSV/Excel file and send one API call per row (assignment endpoint) |
+| **Bulk Assignment Import** | Upload a CSV/Excel file and send one API call per row (assignment endpoint); large CSVs streamed in 50,000-row batches |
 | **Bulk Data Feeder** | Upload a CSV/Excel file and POST each row to any endpoint |
 | **Environments** | Store multiple base-URL + credential sets and switch between them |
 | **Conversion Tables** | Translate IDs from one environment to another before sending |
@@ -28,6 +30,15 @@ docker-compose up -d
 
 The app is available at **http://localhost:3000**.
 
+On first run you will be redirected to `/setup` to create the initial admin account.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SECURE_COOKIES` | `false` | Set to `true` if the app is served over HTTPS to enable the `Secure` flag on auth cookies |
+| `JWT_SECRET` | *(auto-generated)* | Secret used to sign authentication tokens. Set a fixed value to preserve sessions across container restarts |
+
 ### Updating to a new version
 
 ```bash
@@ -36,7 +47,7 @@ docker-compose build
 docker-compose up -d
 ```
 
-The version number is shown in the top bar of every page. Use it to confirm you are running the latest build.
+The version number is shown on all pages. Use it to confirm you are running the latest build.
 
 ### Local development
 
@@ -48,6 +59,21 @@ npm run dev
 ---
 
 ## Pages
+
+### Authentication (`/login`, `/setup`)
+
+The first time the app starts, navigating to any page redirects to `/setup` where you create the initial admin account. Subsequent visits go to `/login`.
+
+There are two user profiles:
+
+| Profile | Capabilities |
+|---|---|
+| **Admin** | Full access — user management, all endpoints |
+| **User** | Access only to endpoints explicitly allowed by an admin |
+
+→ See [User Management](#user-management--admin-users) below.
+
+---
 
 ### Home — API Explorer (`/`)
 
@@ -102,28 +128,56 @@ Map IDs from a source environment to a target environment. Used by the import an
 
 ---
 
+### User Management (`/admin/users`)
+
+Admins can create and manage user accounts. For each user you can:
+
+- Set a username and password
+- Choose the **profile** (`admin` or `user`)
+- Restrict which **API endpoints** the user can see and call (by default all endpoints are allowed)
+
+Endpoint restrictions are enforced in the sidebar, the Feed page, and the server-side proxy — users cannot bypass them by calling the API directly.
+
+---
+
 ## Architecture
 
 ```
 src/
   app/
-    page.tsx              # Home / API Explorer
-    import/page.tsx       # Bulk Assignment Import
-    feed/page.tsx         # Bulk Data Feeder
-    environments/page.tsx # Environment manager
-    conversions/page.tsx  # Conversion table editor
-    api/proxy/route.ts    # Server-side proxy (avoids CORS)
+    page.tsx                  # Home / API Explorer
+    import/page.tsx           # Bulk Assignment Import
+    feed/page.tsx             # Bulk Data Feeder
+    environments/page.tsx     # Environment manager
+    conversions/page.tsx      # Conversion table editor
+    login/page.tsx            # Login page
+    setup/page.tsx            # First-run admin setup
+    admin/users/page.tsx      # User management (admin only)
+    api/
+      proxy/route.ts          # Server-side proxy (avoids CORS, enforces endpoint access)
+      auth/login/route.ts     # Issues JWT cookie on successful login
+      auth/me/route.ts        # Returns current user from cookie
+      users/route.ts          # CRUD for user accounts
+      setup/route.ts          # First-run setup endpoint
   lib/
-    endpoints.ts          # Endpoint catalogue
-    storage.ts            # localStorage helpers + conversion logic
-    version.ts            # APP_VERSION constant
+    endpoints.ts              # Endpoint catalogue
+    storage.ts                # localStorage helpers + conversion logic
+    auth.ts                   # JWT sign/verify helpers
+    data-store.ts             # Server-side user persistence (JSON file)
+    version.ts                # APP_VERSION constant
   components/
-    ConfigBar.tsx         # Top bar shown on the home page
+    ConfigBar.tsx             # Top bar shown on the home page
+    AuthContext.tsx           # React context for the logged-in user
+    UserBadge.tsx             # Avatar/logout button in the top bar
+    Sidebar.tsx               # Endpoint list (filtered by allowedEndpoints)
+  proxy.ts                    # Next.js 16 proxy — JWT auth guard for all routes
 ```
 
-All configuration (environments, conversion tables, active credentials) is persisted in the browser's `localStorage`. No database is required.
+**Persistence:**
+- User accounts are stored server-side in a JSON file (`/data/users.json` inside the container).
+- Environments, conversion tables, and active credentials are stored in the browser's `localStorage`.
 
-The `/api/proxy` server route forwards requests to the UbiLaundry server so that CORS restrictions do not apply.
+The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS restrictions. It also enforces per-user endpoint access: if a user does not have permission to call a given endpoint, the proxy returns HTTP 403.
 
 ---
 
@@ -131,6 +185,10 @@ The `/api/proxy` server route forwards requests to the UbiLaundry server so that
 
 | Version | Changes |
 |---|---|
+| 1.10.1 | Chunked CSV reading via `Blob.slice()` — prevents OOM errors on 500k-row files; 50,000-row batches loaded on demand |
+| 1.10.0 | Authentication (login / setup), user management, per-user endpoint access control, version shown on all pages |
+| 1.9.1 | Fix large CSV files returning "No valid rows" (XLSX silent failure on large CSVs) |
+| 1.9.0 | Batch loading for files over 50,000 rows |
 | 1.8.8 | Fix `lastseenlocationid` column name typo in SQL export |
 | 1.8.7 | Fix `washingcycleseed` column name typo in SQL export |
 | 1.8.6 | Skip trailing empty Excel rows in import and SQL export |
