@@ -100,14 +100,13 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
 }
 
 const BATCH_SIZE = 50_000;
+const CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB per read
 
-// ─── CSV parser (handles quoted fields, BOM, comma/semicolon/tab) ─────────────
+// ─── CSV parser helpers ───────────────────────────────────────────────────────
 
 function detectSep(line: string): string {
-  // Count unquoted occurrences of each candidate separator
   const candidates = [',', ';', '\t'];
-  let best = ',';
-  let bestCount = 0;
+  let best = ','; let bestCount = 0;
   for (const sep of candidates) {
     let count = 0; let inQ = false;
     for (const ch of line) { if (ch === '"') inQ = !inQ; else if (!inQ && ch === sep) count++; }
@@ -118,19 +117,14 @@ function detectSep(line: string): string {
 
 function parseCSVRow(line: string, sep: string): string[] {
   const result: string[] = [];
-  let current = '';
-  let inQuotes = false;
+  let current = ''; let inQuotes = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (ch === '"') {
       if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
       else inQuotes = !inQuotes;
-    } else if (ch === sep && !inQuotes) {
-      result.push(current);
-      current = '';
-    } else {
-      current += ch;
-    }
+    } else if (ch === sep && !inQuotes) { result.push(current); current = ''; }
+    else { current += ch; }
   }
   result.push(current);
   return result;
@@ -147,56 +141,87 @@ function cleanRow(raw: Record<string, unknown>): Row | null {
   return r as Row;
 }
 
-function parseCSVText(text: string): Row[] {
-  const clean = text.startsWith('﻿') ? text.slice(1) : text;
-  const lines = clean.split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const sep = detectSep(lines[0]);
-  const headers = parseCSVRow(lines[0], sep).map(h => h.trim().replace(/^"|"$/g, ''));
-  const rows: Row[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const values = parseCSVRow(line, sep);
-    const raw: Record<string, unknown> = {};
-    for (let j = 0; j < headers.length; j++) {
-      if (headers[j]) raw[headers[j]] = values[j] ?? '';
-    }
-    const row = cleanRow(raw);
-    if (row) rows.push(row);
-  }
-  return rows;
+function parseLine(line: string, headers: string[], sep: string): Row | null {
+  const values = parseCSVRow(line, sep);
+  const raw: Record<string, unknown> = {};
+  for (let j = 0; j < headers.length; j++) { if (headers[j]) raw[headers[j]] = values[j] ?? ''; }
+  return cleanRow(raw);
 }
 
-// ─── File parser (CSV → native text, Excel → XLSX) ───────────────────────────
-
-function parseFile(file: File): Promise<Row[]> {
-  const isCSV = /\.(csv|txt)$/i.test(file.name);
-
+function readBlobAsText(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    if (isCSV) {
-      reader.onload = (e) => {
-        try { resolve(parseCSVText(e.target?.result as string)); }
-        catch (err) { reject(err); }
-      };
-      reader.onerror = reject;
-      reader.readAsText(file);
-    } else {
-      reader.onload = (e) => {
-        try {
-          const data = e.target?.result as ArrayBuffer;
-          const wb = XLSX.read(data, { type: 'array', raw: false, cellDates: false });
-          const ws = wb.Sheets[wb.SheetNames[0]];
-          const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
-          resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
-        } catch (err) { reject(err); }
-      };
-      reader.onerror = reject;
-      reader.readAsArrayBuffer(file);
-    }
+    const r = new FileReader();
+    r.onload = e => resolve(e.target?.result as string);
+    r.onerror = reject;
+    r.readAsText(blob);
   });
 }
+
+// Reads the header line from the file and returns sep, headers, and the byte
+// offset at which data rows begin (after the header newline).
+async function initCSV(file: File): Promise<{ headers: string[]; sep: string; firstDataOffset: number }> {
+  const head = await readBlobAsText(file.slice(0, Math.min(65536, file.size)));
+  const clean = head.startsWith('﻿') ? head.slice(1) : head;
+  const nlIdx = clean.indexOf('\n');
+  const headerLine = (nlIdx >= 0 ? clean.slice(0, nlIdx) : clean).replace(/\r$/, '');
+  const sep = detectSep(headerLine);
+  const headers = parseCSVRow(headerLine, sep).map(h => h.trim().replace(/^"|"$/g, ''));
+  // firstDataOffset in bytes (TextEncoder gives exact UTF-8 byte length)
+  const firstDataOffset = new TextEncoder().encode(clean.slice(0, nlIdx + 1)).length;
+  return { headers, sep, firstDataOffset };
+}
+
+// Reads at most BATCH_SIZE rows starting from startOffset bytes.
+// Returns the rows, the next byte offset, and whether more data exists.
+async function loadCSVBatch(
+  file: File, headers: string[], sep: string, startOffset: number,
+): Promise<{ rows: Row[]; nextOffset: number; hasMore: boolean }> {
+  const enc = new TextEncoder();
+  let bytePos = startOffset;
+  let textBuf = '';
+  const rows: Row[] = [];
+
+  while (rows.length < BATCH_SIZE) {
+    const nl = textBuf.indexOf('\n');
+    if (nl >= 0) {
+      const line = textBuf.slice(0, nl).replace(/\r$/, '');
+      textBuf = textBuf.slice(nl + 1);
+      if (line.trim()) { const row = parseLine(line, headers, sep); if (row) rows.push(row); }
+    } else if (bytePos < file.size) {
+      const chunk = await readBlobAsText(file.slice(bytePos, Math.min(bytePos + CHUNK_BYTES, file.size)));
+      bytePos += enc.encode(chunk).length;
+      textBuf += chunk;
+    } else {
+      // EOF — flush remainder
+      if (textBuf.trim()) { const row = parseLine(textBuf.trim(), headers, sep); if (row) rows.push(row); textBuf = ''; }
+      break;
+    }
+  }
+
+  const remainingBytes = enc.encode(textBuf).length;
+  const nextOffset = bytePos - remainingBytes;
+  return { rows, nextOffset, hasMore: nextOffset < file.size || textBuf.trim().length > 0 };
+}
+
+// ─── Excel parser (loads all rows at once — suitable for smaller files) ───────
+
+function parseExcelFile(file: File): Promise<Row[]> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target?.result as ArrayBuffer, { type: 'array', raw: false, cellDates: false });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+interface CSVMeta { file: File; headers: string[]; sep: string; }
 
 const STATUS_ICON: Record<RowStatus, ReactElement> = {
   pending: <span className="w-4 h-4 rounded-full border border-slate-600 inline-block" />,
@@ -230,18 +255,21 @@ export default function ImportPage() {
   const [envs] = useState<Environment[]>(() => loadEnvironments());
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
-  const [allRows, setAllRows]      = useState<Row[]>([]);
+  const [csvMeta, setCsvMeta]           = useState<CSVMeta | null>(null);
+  const [batchOffsets, setBatchOffsets] = useState<number[]>([]);
+  const [rows, setRows]                 = useState<Row[]>([]);
   const [currentBatch, setCurrentBatch] = useState(0);
-  const [parsing, setParsing]     = useState(false);
-  const [results, setResults]     = useState<RowResult[]>([]);
-  const [running, setRunning]     = useState(false);
-  const [done, setDone]           = useState(false);
-  const [dragging, setDragging]   = useState(false);
-  const [fileName, setFileName]   = useState('');
-  const [parseError, setParseError] = useState('');
-  const [reassign, setReassign]   = useState(true);
-  const [returnValue, setReturnValue] = useState(true);
-  const [concurrency]             = useState(3);
+  const [hasMoreBatches, setHasMoreBatches] = useState(false);
+  const [parsing, setParsing]           = useState(false);
+  const [results, setResults]           = useState<RowResult[]>([]);
+  const [running, setRunning]           = useState(false);
+  const [done, setDone]                 = useState(false);
+  const [dragging, setDragging]         = useState(false);
+  const [fileName, setFileName]         = useState('');
+  const [parseError, setParseError]     = useState('');
+  const [reassign, setReassign]         = useState(true);
+  const [returnValue, setReturnValue]   = useState(true);
+  const [concurrency]                   = useState(3);
 
   const [sourceEnvId, setSourceEnvId]             = useState('');
   const [selectedTableIds, setSelectedTableIds]   = useState<Set<string>>(new Set());
@@ -254,15 +282,10 @@ export default function ImportPage() {
   const [sqlSubTableName, setSqlSubTableName]     = useState('item_laundry');
   const [sqlUpsert, setSqlUpsert]                 = useState(true);
 
-  const abortRef   = useRef(false);
-  const fileRef     = useRef<HTMLInputElement>(null);
-  const pendingRef  = useRef<Map<number, Partial<RowResult>>>(new Map());
-
-  const rows = useMemo(
-    () => allRows.slice(currentBatch * BATCH_SIZE, (currentBatch + 1) * BATCH_SIZE),
-    [allRows, currentBatch]
-  );
-  const totalBatches = Math.ceil(allRows.length / BATCH_SIZE);
+  const abortRef        = useRef(false);
+  const fileRef         = useRef<HTMLInputElement>(null);
+  const pendingRef      = useRef<Map<number, Partial<RowResult>>>(new Map());
+  const allExcelRowsRef = useRef<Row[]>([]);
 
   const targetEnv = useMemo(() =>
     envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
@@ -295,19 +318,39 @@ export default function ImportPage() {
 
   const loadFile = useCallback(async (file: File) => {
     setParseError('');
-    setAllRows([]);
+    setRows([]);
+    setCsvMeta(null);
+    setBatchOffsets([]);
+    setHasMoreBatches(false);
     setCurrentBatch(0);
     setResults([]);
     setDone(false);
     setFileName(file.name);
     setParsing(true);
+    allExcelRowsRef.current = [];
     try {
-      const parsed = await parseFile(file);
-      if (parsed.length === 0) {
-        setParseError('No valid rows found. Make sure the file has an "id" column.');
-        return;
+      const isCSV = file.name.toLowerCase().endsWith('.csv');
+      if (isCSV) {
+        const { headers, sep, firstDataOffset } = await initCSV(file);
+        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, headers, sep, firstDataOffset);
+        if (batch.length === 0) {
+          setParseError('No valid rows found. Make sure the file has an "id" column.');
+          return;
+        }
+        setCsvMeta({ file, headers, sep });
+        setBatchOffsets(hasMore ? [firstDataOffset, nextOffset] : [firstDataOffset]);
+        setHasMoreBatches(hasMore);
+        setRows(batch);
+      } else {
+        const allRows = await parseExcelFile(file);
+        if (allRows.length === 0) {
+          setParseError('No valid rows found. Make sure the file has an "id" column.');
+          return;
+        }
+        allExcelRowsRef.current = allRows;
+        setRows(allRows.slice(0, BATCH_SIZE));
+        setHasMoreBatches(allRows.length > BATCH_SIZE);
       }
-      setAllRows(parsed);
     } catch (err: unknown) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse file');
     } finally {
@@ -410,17 +453,42 @@ export default function ImportPage() {
 
   const stop  = () => { abortRef.current = true; };
 
-  const switchBatch = (idx: number) => {
+  const switchBatch = useCallback(async (idx: number) => {
     if (running) return;
-    setCurrentBatch(idx);
     setResults([]);
     setDone(false);
     setExpandedIdx(null);
-  };
+
+    if (csvMeta) {
+      const offset = batchOffsets[idx];
+      if (offset === undefined) return;
+      setParsing(true);
+      try {
+        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(
+          csvMeta.file, csvMeta.headers, csvMeta.sep, offset,
+        );
+        setRows(batch);
+        setCurrentBatch(idx);
+        setHasMoreBatches(hasMore);
+        if (hasMore && batchOffsets[idx + 1] === undefined) {
+          setBatchOffsets(prev => { const n = [...prev]; n[idx + 1] = nextOffset; return n; });
+        }
+      } finally {
+        setParsing(false);
+      }
+    } else {
+      const allRows = allExcelRowsRef.current;
+      setRows(allRows.slice(idx * BATCH_SIZE, (idx + 1) * BATCH_SIZE));
+      setCurrentBatch(idx);
+      setHasMoreBatches((idx + 1) * BATCH_SIZE < allRows.length);
+    }
+  }, [running, csvMeta, batchOffsets]);
 
   const reset = () => {
-    setAllRows([]); setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
+    setRows([]); setCsvMeta(null); setBatchOffsets([]); setHasMoreBatches(false);
+    setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
+    allExcelRowsRef.current = [];
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -639,9 +707,9 @@ export default function ImportPage() {
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          onClick={() => !allRows.length && !parsing && fileRef.current?.click()}
+          onClick={() => !rows.length && !parsing && fileRef.current?.click()}
           className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer
-            ${dragging ? 'border-blue-400 bg-blue-400/5' : rows.length ? 'border-slate-700 cursor-default' : 'border-slate-700 hover:border-slate-500'}`}
+            ${dragging ? 'border-blue-400 bg-blue-400/5' : rows.length > 0 ? 'border-slate-700 cursor-default' : 'border-slate-700 hover:border-slate-500'}`}
         >
           <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={onFileChange} />
           {parsing ? (
@@ -662,25 +730,25 @@ export default function ImportPage() {
               </svg>
               <div className="text-left">
                 <p className="text-white font-medium">{fileName}</p>
-                {totalBatches > 1
-                  ? <p className="text-slate-400 text-sm">{allRows.length} rows — batch {currentBatch + 1} of {totalBatches} ({rows.length} rows)</p>
+                {(hasMoreBatches || currentBatch > 0)
+                  ? <p className="text-slate-400 text-sm">Batch {currentBatch + 1}{hasMoreBatches ? '+' : ''} — {rows.length} rows</p>
                   : <p className="text-slate-400 text-sm">{rows.length} rows ready to import</p>
                 }
               </div>
-              {totalBatches > 1 && (
+              {(hasMoreBatches || currentBatch > 0) && (
                 <div className="flex items-center gap-1 ml-2">
                   <button
                     onClick={(e) => { e.stopPropagation(); switchBatch(currentBatch - 1); }}
-                    disabled={currentBatch === 0 || running}
+                    disabled={currentBatch === 0 || running || parsing}
                     className="p-1.5 rounded border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                     title="Previous batch"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/></svg>
                   </button>
-                  <span className="text-xs text-slate-500 px-1">{currentBatch + 1}/{totalBatches}</span>
+                  <span className="text-xs text-slate-500 px-1">{currentBatch + 1}{hasMoreBatches ? '+' : ''}</span>
                   <button
                     onClick={(e) => { e.stopPropagation(); switchBatch(currentBatch + 1); }}
-                    disabled={currentBatch >= totalBatches - 1 || running}
+                    disabled={!hasMoreBatches || running || parsing}
                     className="p-1.5 rounded border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                     title="Next batch"
                   >
@@ -866,8 +934,8 @@ export default function ImportPage() {
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                   </svg>
-                  {totalBatches > 1
-                    ? `Import batch ${currentBatch + 1}/${totalBatches} (${rows.length} items)`
+                  {(hasMoreBatches || currentBatch > 0)
+                    ? `Import batch ${currentBatch + 1} (${rows.length} items)`
                     : `Import ${rows.length} items`}
                 </button>
               </div>
@@ -982,7 +1050,7 @@ export default function ImportPage() {
               </div>
               <div className="flex items-center gap-2">
                 <button onClick={runImport} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors">
-                  {totalBatches > 1 ? `Import batch ${currentBatch + 1}/${totalBatches} (${rows.length})` : `Import ${rows.length} items`}
+                  {(hasMoreBatches || currentBatch > 0) ? `Import batch ${currentBatch + 1} (${rows.length})` : `Import ${rows.length} items`}
                 </button>
                 <button onClick={() => setShowPreview(false)} className="text-slate-400 hover:text-white p-1.5 rounded">
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
