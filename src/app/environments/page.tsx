@@ -8,7 +8,7 @@ import {
   genId, type Environment, type ConversionTable,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
-import { useAuth } from '@/components/AuthContext';
+import { useIsAdmin } from '@/components/AuthContext';
 import UserBadge from '@/components/UserBadge';
 import type { ServerEnvironment } from '@/lib/data-store';
 
@@ -24,8 +24,8 @@ interface ConfigBundle {
 type StorageTarget = 'local' | 'server';
 
 export default function EnvironmentsPage() {
-  const { user } = useAuth();
-  const isAdmin = user?.profile === 'admin';
+  const isAdminState = useIsAdmin();  // null while loading, then true/false
+  const isAdmin = isAdminState === true;
 
   // Local environments
   const [envs, setEnvs] = useState<Environment[]>([]);

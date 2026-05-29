@@ -9,7 +9,7 @@ import {
   type Environment, type ConversionTable, type ConversionMapping, type FallbackStrategy,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
-import { useAuth } from '@/components/AuthContext';
+import { useIsAdmin } from '@/components/AuthContext';
 import UserBadge from '@/components/UserBadge';
 import type { ServerEnvironment, ServerConversionTable } from '@/lib/data-store';
 
@@ -38,8 +38,8 @@ function extractIdOptions(items: unknown[]): IdOption[] {
 }
 
 export default function ConversionsPage() {
-  const { user } = useAuth();
-  const isAdmin = user?.profile === 'admin';
+  const isAdminState = useIsAdmin();
+  const isAdmin = isAdminState === true;
 
   const [envs, setEnvs]     = useState<Environment[]>([]);
   const [tables, setTables] = useState<ConversionTable[]>([]);

@@ -25,6 +25,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetch('/api/auth/me')
       .then(r => r.json())
       .then(d => setUser(d.user ?? null))
+      .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }
 
@@ -35,4 +36,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   return useContext(Ctx);
+}
+
+export function useIsAdmin(): boolean | null {
+  const { user, loading } = useContext(Ctx);
+  if (loading) return null;        // null = still loading
+  return user?.profile === 'admin';
 }

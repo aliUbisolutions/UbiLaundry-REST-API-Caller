@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
+import { useIsAdmin } from '@/components/AuthContext';
 import type { PublicUser, ServerEnvironment } from '@/lib/data-store';
 
 const ALL_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
