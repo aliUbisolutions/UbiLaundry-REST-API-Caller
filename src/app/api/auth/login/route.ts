@@ -34,10 +34,10 @@ export async function POST(request: NextRequest) {
   const response = NextResponse.json({ ok: true, profile: user.profile });
   response.cookies.set(JWT_COOKIE, token, {
     httpOnly: true,
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
     maxAge: 60 * 60 * 8,
-    secure: process.env.NODE_ENV === 'production',
+    secure: process.env.SECURE_COOKIES === 'true',
   });
   return response;
 }

@@ -7,6 +7,7 @@ services:
     environment:
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
       - DATA_DIR=/data
+      - SECURE_COOKIES=${SECURE_COOKIES:-false}
     volumes:
       - ubilaundry-data:/data
 
