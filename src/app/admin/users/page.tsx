@@ -1,12 +1,21 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
 import { useIsAdmin } from '@/components/AuthContext';
+import { endpoints } from '@/lib/endpoints';
 import type { PublicUser, ServerEnvironment } from '@/lib/data-store';
 
 const ALL_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
+
+const METHOD_COLORS: Record<string, string> = {
+  GET: 'text-emerald-400',
+  POST: 'text-yellow-400',
+  PUT: 'text-blue-400',
+  PATCH: 'text-orange-400',
+  DELETE: 'text-red-400',
+};
 
 interface UserForm {
   username: string;
@@ -14,6 +23,7 @@ interface UserForm {
   profile: 'admin' | 'user';
   allowedMethods: string[];
   serverEnvAccess: string[] | 'all';
+  allowedEndpoints: string[] | 'all';
 }
 
 const DEFAULT_FORM: UserForm = {
@@ -22,6 +32,7 @@ const DEFAULT_FORM: UserForm = {
   profile: 'user',
   allowedMethods: ['GET'],
   serverEnvAccess: [],
+  allowedEndpoints: 'all',
 };
 
 export default function AdminUsersPage() {
@@ -55,6 +66,7 @@ export default function AdminUsersPage() {
       profile: u.profile,
       allowedMethods: u.allowedMethods,
       serverEnvAccess: u.serverEnvAccess,
+      allowedEndpoints: u.allowedEndpoints ?? 'all',
     });
     setError('');
     setShowForm(true);
@@ -71,6 +83,7 @@ export default function AdminUsersPage() {
         profile: form.profile,
         allowedMethods: form.allowedMethods,
         serverEnvAccess: form.serverEnvAccess,
+        allowedEndpoints: form.allowedEndpoints,
       };
       if (form.password) body.password = form.password;
 
@@ -119,6 +132,48 @@ export default function AdminUsersPage() {
 
   const envAccessAll = form.serverEnvAccess === 'all';
   const envAccessList = envAccessAll ? [] : (form.serverEnvAccess as string[]);
+
+  const endpointAccessAll = form.allowedEndpoints === 'all';
+  const endpointAccessList = endpointAccessAll ? [] : (form.allowedEndpoints as string[]);
+
+  const endpointsByGroup = useMemo(() => {
+    const map: Record<string, typeof endpoints> = {};
+    for (const ep of endpoints) {
+      if (!map[ep.group]) map[ep.group] = [];
+      map[ep.group].push(ep);
+    }
+    return map;
+  }, []);
+
+  const [epGroupExpanded, setEpGroupExpanded] = useState<Record<string, boolean>>({});
+
+  function toggleEpGroup(group: string) {
+    setEpGroupExpanded(prev => ({ ...prev, [group]: !prev[group] }));
+  }
+
+  function isEpGroupExpanded(group: string) {
+    return group in epGroupExpanded ? epGroupExpanded[group] : false;
+  }
+
+  function toggleEndpoint(id: string) {
+    const current = endpointAccessList;
+    setForm(f => ({
+      ...f,
+      allowedEndpoints: current.includes(id) ? current.filter(x => x !== id) : [...current, id],
+    }));
+  }
+
+  function toggleEndpointGroup(group: string) {
+    const groupIds = endpointsByGroup[group].map(e => e.id);
+    const current = endpointAccessList;
+    const allSelected = groupIds.every(id => current.includes(id));
+    setForm(f => ({
+      ...f,
+      allowedEndpoints: allSelected
+        ? current.filter(id => !groupIds.includes(id))
+        : [...new Set([...current, ...groupIds])],
+    }));
+  }
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -272,6 +327,70 @@ export default function AdminUsersPage() {
                         <span className="text-slate-500 text-xs font-mono">{env.baseUrl}</span>
                       </label>
                     ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Endpoint access */}
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-2">Endpoint access</label>
+                <label className="flex items-center gap-2 mb-2 text-sm text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={endpointAccessAll}
+                    onChange={e => setForm(f => ({ ...f, allowedEndpoints: e.target.checked ? 'all' : [] }))}
+                    className="rounded"
+                  />
+                  Access to all endpoints (default)
+                </label>
+                {!endpointAccessAll && (
+                  <div className="border border-slate-600 rounded max-h-52 overflow-y-auto">
+                    {Object.entries(endpointsByGroup).map(([group, eps]) => {
+                      const groupIds = eps.map(e => e.id);
+                      const allSelected = groupIds.every(id => endpointAccessList.includes(id));
+                      const someSelected = groupIds.some(id => endpointAccessList.includes(id));
+                      return (
+                        <div key={group} className="border-b border-slate-700 last:border-0">
+                          <div className="flex items-center gap-2 px-2 py-1.5 bg-slate-700/40">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              ref={el => { if (el) el.indeterminate = !allSelected && someSelected; }}
+                              onChange={() => toggleEndpointGroup(group)}
+                              className="rounded shrink-0"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => toggleEpGroup(group)}
+                              className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 flex-1 text-left"
+                            >
+                              <svg
+                                className={`w-3 h-3 transition-transform shrink-0 ${isEpGroupExpanded(group) ? 'rotate-90' : ''}`}
+                                fill="currentColor" viewBox="0 0 20 20"
+                              >
+                                <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                              </svg>
+                              {group}
+                              <span className="text-slate-500 font-normal ml-1">({eps.length})</span>
+                            </button>
+                          </div>
+                          {isEpGroupExpanded(group) && eps.map(ep => (
+                            <label key={ep.id} className="flex items-center gap-2 px-3 py-1 pl-8 cursor-pointer hover:bg-slate-700/20">
+                              <input
+                                type="checkbox"
+                                checked={endpointAccessList.includes(ep.id)}
+                                onChange={() => toggleEndpoint(ep.id)}
+                                className="rounded shrink-0"
+                              />
+                              <span className={`text-xs font-mono font-bold w-12 shrink-0 ${METHOD_COLORS[ep.method] ?? 'text-slate-400'}`}>
+                                {ep.method}
+                              </span>
+                              <span className="text-xs text-slate-300 truncate">{ep.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

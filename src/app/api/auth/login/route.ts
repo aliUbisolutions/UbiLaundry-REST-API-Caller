@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
     profile: user.profile,
     allowedMethods: user.allowedMethods,
     serverEnvAccess: user.serverEnvAccess,
+    allowedEndpoints: user.allowedEndpoints ?? 'all',
   });
 
   const response = NextResponse.json({ ok: true, profile: user.profile });

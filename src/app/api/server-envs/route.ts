@@ -12,6 +12,7 @@ function userFromHeaders(req: NextRequest): PublicUser {
     profile: (req.headers.get('x-user-profile') ?? 'user') as 'admin' | 'user',
     allowedMethods: JSON.parse(req.headers.get('x-user-methods') ?? '[]'),
     serverEnvAccess: JSON.parse(req.headers.get('x-user-env-access') ?? '[]'),
+    allowedEndpoints: JSON.parse(req.headers.get('x-user-endpoints') ?? '"all"'),
   };
 }
 

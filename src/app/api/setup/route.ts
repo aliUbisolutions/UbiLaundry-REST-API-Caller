@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
     profile: 'admin' as const,
     allowedMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
     serverEnvAccess: 'all' as const,
+    allowedEndpoints: 'all' as const,
   };
   createUser(user);
 
@@ -37,6 +38,7 @@ export async function POST(request: NextRequest) {
     profile: user.profile,
     allowedMethods: user.allowedMethods,
     serverEnvAccess: user.serverEnvAccess,
+    allowedEndpoints: user.allowedEndpoints,
   });
 
   const response = NextResponse.json({ ok: true });

@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
       profile: payload.profile,
       allowedMethods: payload.allowedMethods,
       serverEnvAccess: payload.serverEnvAccess,
+      allowedEndpoints: payload.allowedEndpoints ?? 'all',
     },
   });
 }

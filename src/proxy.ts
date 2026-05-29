@@ -42,6 +42,7 @@ export async function proxy(request: NextRequest) {
   headers.set('x-user-profile', payload.profile);
   headers.set('x-user-methods', JSON.stringify(payload.allowedMethods));
   headers.set('x-user-env-access', JSON.stringify(payload.serverEnvAccess));
+  headers.set('x-user-endpoints', JSON.stringify(payload.allowedEndpoints ?? 'all'));
 
   return NextResponse.next({ request: { headers } });
 }

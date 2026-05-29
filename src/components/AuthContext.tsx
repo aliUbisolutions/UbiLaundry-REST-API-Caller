@@ -7,6 +7,7 @@ export interface AuthUser {
   profile: 'admin' | 'user';
   allowedMethods: string[];
   serverEnvAccess: string[] | 'all';
+  allowedEndpoints: string[] | 'all';
 }
 
 interface AuthCtx {

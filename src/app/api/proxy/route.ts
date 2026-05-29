@@ -4,11 +4,12 @@ export const dynamic = 'force-dynamic';
 
 async function handleRequest(request: NextRequest) {
   const body = await request.json();
-  const { url, method, headers: reqHeaders, body: reqBody } = body as {
+  const { url, method, headers: reqHeaders, body: reqBody, endpointId } = body as {
     url: string;
     method: string;
     headers: Record<string, string>;
     body?: string;
+    endpointId?: string;
   };
 
   if (!url) {
@@ -20,6 +21,15 @@ async function handleRequest(request: NextRequest) {
   if (allowedMethods.length > 0 && !allowedMethods.includes(method?.toUpperCase())) {
     return NextResponse.json(
       { error: `Method ${method} is not allowed for your account` },
+      { status: 403 }
+    );
+  }
+
+  // Enforce per-user allowed endpoints
+  const allowedEndpoints: string[] | 'all' = JSON.parse(request.headers.get('x-user-endpoints') ?? '"all"');
+  if (endpointId && allowedEndpoints !== 'all' && !allowedEndpoints.includes(endpointId)) {
+    return NextResponse.json(
+      { error: 'This endpoint is not available for your account' },
       { status: 403 }
     );
   }

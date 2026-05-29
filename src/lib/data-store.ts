@@ -31,6 +31,7 @@ export interface StoredUser {
   profile: 'admin' | 'user';
   allowedMethods: string[];
   serverEnvAccess: string[] | 'all';
+  allowedEndpoints: string[] | 'all';
 }
 
 export interface PublicUser extends Omit<StoredUser, 'passwordHash'> {}

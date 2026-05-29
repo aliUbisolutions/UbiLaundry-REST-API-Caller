@@ -14,6 +14,7 @@ export interface JWTPayload {
   profile: 'admin' | 'user';
   allowedMethods: string[];
   serverEnvAccess: string[] | 'all';
+  allowedEndpoints: string[] | 'all';
 }
 
 export async function signToken(payload: JWTPayload): Promise<string> {

@@ -16,6 +16,7 @@ export async function POST(request: NextRequest) {
     profile: 'admin' | 'user';
     allowedMethods: string[];
     serverEnvAccess: string[] | 'all';
+    allowedEndpoints: string[] | 'all';
   };
 
   if (!body.username || !body.password) {
@@ -30,6 +31,7 @@ export async function POST(request: NextRequest) {
     profile: body.profile ?? 'user',
     allowedMethods: body.allowedMethods ?? ['GET'],
     serverEnvAccess: body.serverEnvAccess ?? [],
+    allowedEndpoints: body.allowedEndpoints ?? 'all',
   };
   createUser(user);
   const { passwordHash: _, ...pub } = user;

@@ -7,6 +7,7 @@ import type { ReactElement } from 'react';
 import { endpoints, type Endpoint } from '@/lib/endpoints';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
+import { useAuth } from '@/components/AuthContext';
 import {
   loadEnvironments, loadConversionTables, applyConversions,
   type Environment, type ConversionTable,
@@ -132,9 +133,16 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-const POST_ENDPOINTS = endpoints.filter(e => e.method === 'POST');
-
 export default function FeedPage() {
+  const { user } = useAuth();
+
+  const postEndpoints = useMemo(() => {
+    const all = endpoints.filter(e => e.method === 'POST');
+    if (!user || user.allowedEndpoints === 'all') return all;
+    const allowed = new Set(user.allowedEndpoints as string[]);
+    return all.filter(e => allowed.has(e.id));
+  }, [user]);
+
   const [config] = useState<Config>(() => {
     try { return JSON.parse(localStorage.getItem('ubilaundry-config') ?? '{}'); } catch { return {}; }
   });
@@ -187,7 +195,7 @@ export default function FeedPage() {
   );
 
   const endpoint: Endpoint | undefined = useMemo(
-    () => POST_ENDPOINTS.find(e => e.id === selectedId),
+    () => postEndpoints.find(e => e.id === selectedId),
     [selectedId]
   );
 
@@ -199,7 +207,7 @@ export default function FeedPage() {
   // Group endpoints for the selector
   const grouped = useMemo(() => {
     const map: Record<string, Endpoint[]> = {};
-    for (const ep of POST_ENDPOINTS) {
+    for (const ep of postEndpoints) {
       const key = ep.group + (ep.subgroup ? ` › ${ep.subgroup}` : '');
       if (!map[key]) map[key] = [];
       map[key].push(ep);
@@ -305,7 +313,7 @@ export default function FeedPage() {
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson) }),
+            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
           });
           const data = await res.json();
           const elapsed = Date.now() - t0;
@@ -391,7 +399,7 @@ export default function FeedPage() {
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson) }),
+            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
           });
           const data = await res.json();
           const elapsed = Date.now() - t0;

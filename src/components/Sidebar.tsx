@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { endpoints, type Endpoint } from '@/lib/endpoints';
+import { useAuth } from './AuthContext';
 
 interface Props {
   selected: string | null;
@@ -17,20 +18,27 @@ const METHOD_COLORS: Record<string, string> = {
 };
 
 export default function Sidebar({ selected, onSelect }: Props) {
+  const { user } = useAuth();
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
+  const visibleEndpoints = useMemo(() => {
+    if (!user || user.allowedEndpoints === 'all') return endpoints;
+    const allowed = new Set(user.allowedEndpoints as string[]);
+    return endpoints.filter(ep => allowed.has(ep.id));
+  }, [user]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    if (!q) return endpoints;
-    return endpoints.filter(
+    if (!q) return visibleEndpoints;
+    return visibleEndpoints.filter(
       ep =>
         ep.name.toLowerCase().includes(q) ||
         ep.group.toLowerCase().includes(q) ||
         ep.subgroup.toLowerCase().includes(q) ||
         ep.url.toLowerCase().includes(q)
     );
-  }, [search]);
+  }, [search, visibleEndpoints]);
 
   const groups = useMemo(() => {
     const map: Record<string, Record<string, Endpoint[]>> = {};

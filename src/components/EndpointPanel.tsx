@@ -96,6 +96,7 @@ export default function EndpointPanel({ endpoint, config }: Props) {
           method: endpoint.method,
           headers,
           body: body || undefined,
+          endpointId: endpoint.id,
         }),
       });
       const data = await res.json();

@@ -12,6 +12,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     profile?: 'admin' | 'user';
     allowedMethods?: string[];
     serverEnvAccess?: string[] | 'all';
+    allowedEndpoints?: string[] | 'all';
   };
 
   const patch: Record<string, unknown> = {};
@@ -19,6 +20,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   if (body.profile !== undefined) patch.profile = body.profile;
   if (body.allowedMethods !== undefined) patch.allowedMethods = body.allowedMethods;
   if (body.serverEnvAccess !== undefined) patch.serverEnvAccess = body.serverEnvAccess;
+  if (body.allowedEndpoints !== undefined) patch.allowedEndpoints = body.allowedEndpoints;
   if (body.password) patch.passwordHash = await bcrypt.hash(body.password, 10);
 
   const ok = updateUser(id, patch);
