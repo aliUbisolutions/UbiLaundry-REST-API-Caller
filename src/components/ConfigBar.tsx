@@ -106,11 +106,6 @@ export default function ConfigBar({ config, onChange }: Props) {
 
         {/* Actions */}
         <div className="flex items-center gap-2 shrink-0">
-          {config.username && (
-            <span className="text-xs text-slate-400 hidden md:inline">
-              <span className="text-slate-500">User:</span> {config.username}
-            </span>
-          )}
           <Link href="/environments" className="text-xs text-slate-400 hover:text-white px-2 py-1.5 rounded hover:bg-slate-700 transition-colors">
             Environments
           </Link>
@@ -124,6 +119,7 @@ export default function ConfigBar({ config, onChange }: Props) {
             </svg>
             Configure
           </button>
+          <div className="w-px h-5 bg-slate-700 mx-1" />
           <UserBadge />
         </div>
       </div>
