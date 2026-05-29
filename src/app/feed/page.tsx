@@ -6,6 +6,7 @@ import Link from 'next/link';
 import type { ReactElement } from 'react';
 import { endpoints, type Endpoint } from '@/lib/endpoints';
 import { APP_VERSION } from '@/lib/version';
+import UserBadge from '@/components/UserBadge';
 import {
   loadEnvironments, loadConversionTables, applyConversions,
   type Environment, type ConversionTable,
@@ -439,6 +440,7 @@ export default function FeedPage() {
         {config.baseUrl
           ? <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>
           : <span className="text-xs text-yellow-500">Base URL not configured</span>}
+        <UserBadge />
       </div>
 
       <div className="max-w-6xl mx-auto px-5 py-8 space-y-6">

@@ -9,6 +9,7 @@ import {
   type Environment, type ConversionTable, type ConversionNote,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
+import UserBadge from '@/components/UserBadge';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
@@ -539,6 +540,7 @@ export default function ImportPage() {
         {config.baseUrl
           ? <span className="text-xs text-slate-500 font-mono truncate max-w-xs">{config.baseUrl}</span>
           : <span className="text-xs text-yellow-500">Base URL not configured</span>}
+        <UserBadge />
       </div>
 
       <div className="max-w-5xl mx-auto px-5 py-8 space-y-6">

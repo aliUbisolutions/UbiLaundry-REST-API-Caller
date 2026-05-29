@@ -15,6 +15,15 @@ async function handleRequest(request: NextRequest) {
     return NextResponse.json({ error: 'Missing url' }, { status: 400 });
   }
 
+  // Enforce per-user allowed methods (set by proxy.ts via request header)
+  const allowedMethods: string[] = JSON.parse(request.headers.get('x-user-methods') ?? '[]');
+  if (allowedMethods.length > 0 && !allowedMethods.includes(method?.toUpperCase())) {
+    return NextResponse.json(
+      { error: `Method ${method} is not allowed for your account` },
+      { status: 403 }
+    );
+  }
+
   const fetchOptions: RequestInit = {
     method,
     headers: reqHeaders,

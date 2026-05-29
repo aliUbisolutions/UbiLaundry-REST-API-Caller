@@ -7,6 +7,7 @@ import {
   genId, type Environment, type ActiveConfig,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
+import UserBadge from './UserBadge';
 
 export type { ActiveConfig as Config };
 
@@ -123,6 +124,7 @@ export default function ConfigBar({ config, onChange }: Props) {
             </svg>
             Configure
           </button>
+          <UserBadge />
         </div>
       </div>
 

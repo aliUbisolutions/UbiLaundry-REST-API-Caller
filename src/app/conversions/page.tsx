@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import {
   loadEnvironments, loadConversionTables, saveConversionTables,
@@ -9,6 +9,9 @@ import {
   type Environment, type ConversionTable, type ConversionMapping, type FallbackStrategy,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
+import { useAuth } from '@/components/AuthContext';
+import UserBadge from '@/components/UserBadge';
+import type { ServerEnvironment, ServerConversionTable } from '@/lib/data-store';
 
 interface IdOption { id: string; label: string; }
 
@@ -35,14 +38,23 @@ function extractIdOptions(items: unknown[]): IdOption[] {
 }
 
 export default function ConversionsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.profile === 'admin';
+
   const [envs, setEnvs]     = useState<Environment[]>([]);
   const [tables, setTables] = useState<ConversionTable[]>([]);
   const [selected, setSelected] = useState<ConversionTable | null>(null);
+  const [isServerTable, setIsServerTable] = useState(false);
+
+  // Server-side
+  const [serverEnvs, setServerEnvs] = useState<ServerEnvironment[]>([]);
+  const [serverTables, setServerTables] = useState<ServerConversionTable[]>([]);
 
   // New table form
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', sourceEnvId: '', targetEnvId: '' });
   const [formPaths, setFormPaths] = useState<string[]>(['']);
+  const [formTarget, setFormTarget] = useState<'local' | 'server'>('local');
 
   // Inline name editing
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -55,19 +67,63 @@ export default function ConversionsPage() {
   const [loadError, setLoadError]     = useState('');
   const [sortBy, setSortBy]           = useState<'id' | 'name'>('id');
 
+  // Combined env list for dropdowns
+  const allEnvs: (Environment | ServerEnvironment)[] = [...envs, ...serverEnvs];
+
+  const loadServerData = useCallback(() => {
+    fetch('/api/server-envs').then(r => r.json()).then(setServerEnvs).catch(() => {});
+    fetch('/api/server-conversions').then(r => r.json()).then(setServerTables).catch(() => {});
+  }, []);
+
   useEffect(() => {
     setEnvs(loadEnvironments());
     setTables(loadConversionTables());
-  }, []);
+    loadServerData();
+  }, [loadServerData]);
 
   const persist = (updated: ConversionTable[]) => { saveConversionTables(updated); setTables(updated); };
 
-  const createTable = () => {
+  const persistServer = async (updated: ConversionTable) => {
+    await fetch(`/api/server-conversions/${updated.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    });
+    loadServerData();
+  };
+
+  const persistSelected = (updated: ConversionTable) => {
+    if (isServerTable) {
+      persistServer(updated);
+      setSelected(updated);
+    } else {
+      persist(tables.map(t => t.id === updated.id ? updated : t));
+      setSelected(updated);
+    }
+  };
+
+  const createTable = async () => {
     const validPaths = formPaths.map(p => p.trim()).filter(Boolean);
     if (!form.name.trim() || !form.sourceEnvId || !form.targetEnvId || validPaths.length === 0) return;
-    const t: ConversionTable = { id: genId(), ...form, fieldPaths: validPaths, mappings: [], fallback: 'error' };
-    persist([...tables, t]);
-    setSelected(t);
+
+    if (formTarget === 'server') {
+      const res = await fetch('/api/server-conversions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, fieldPaths: validPaths, mappings: [], fallback: 'error' }),
+      });
+      if (res.ok) {
+        const t = await res.json();
+        loadServerData();
+        setSelected(t as ConversionTable);
+        setIsServerTable(true);
+      }
+    } else {
+      const t: ConversionTable = { id: genId(), ...form, fieldPaths: validPaths, mappings: [], fallback: 'error' };
+      persist([...tables, t]);
+      setSelected(t);
+      setIsServerTable(false);
+    }
     setShowForm(false);
     setForm({ name: '', sourceEnvId: '', targetEnvId: '' });
     setFormPaths(['']);
@@ -79,52 +135,45 @@ export default function ConversionsPage() {
 
   const addTablePath = (path: string) => {
     if (!selected || !path.trim()) return;
-    const updated = { ...selected, fieldPaths: [...selected.fieldPaths, path.trim()] };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, fieldPaths: [...selected.fieldPaths, path.trim()] });
   };
 
   const removeTablePath = (i: number) => {
     if (!selected) return;
-    const updated = { ...selected, fieldPaths: selected.fieldPaths.filter((_, idx) => idx !== i) };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, fieldPaths: selected.fieldPaths.filter((_, idx) => idx !== i) });
   };
 
-  const deleteTable = (id: string) => {
+  const deleteTable = async (id: string) => {
     if (!confirm('Delete this conversion table?')) return;
-    const updated = tables.filter(t => t.id !== id);
-    persist(updated);
+    if (isServerTable) {
+      await fetch(`/api/server-conversions/${id}`, { method: 'DELETE' });
+      loadServerData();
+    } else {
+      persist(tables.filter(t => t.id !== id));
+    }
     if (selected?.id === id) setSelected(null);
   };
 
   const addMapping = () => {
     if (!selected) return;
-    const updated: ConversionTable = { ...selected, mappings: [...selected.mappings, { sourceId: '', targetId: '' }] };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, mappings: [...selected.mappings, { sourceId: '', targetId: '' }] });
   };
 
   const updateMapping = (i: number, field: keyof ConversionMapping, val: string) => {
     if (!selected) return;
     const mappings = selected.mappings.map((m, idx) => idx === i ? { ...m, [field]: val } : m);
-    const updated = { ...selected, mappings };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, mappings });
   };
 
   const removeMapping = (i: number) => {
     if (!selected) return;
-    const mappings = selected.mappings.filter((_, idx) => idx !== i);
-    const updated = { ...selected, mappings };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, mappings: selected.mappings.filter((_, idx) => idx !== i) });
   };
 
   const loadIds = async (side: 'source' | 'target') => {
     if (!selected) return;
     const envId = side === 'source' ? selected.sourceEnvId : selected.targetEnvId;
-    const env = envs.find(e => e.id === envId);
+    const env = allEnvs.find(e => e.id === envId);
     if (!env) { setLoadError(`Environment not found`); return; }
     setLoadingIds(side); setLoadError('');
     try {
@@ -143,9 +192,7 @@ export default function ConversionsPage() {
       const match   = targetIds.find(t => (t.label.split(' — ')[1] ?? t.id) === srcName);
       return { sourceId: src.id, targetId: match?.id ?? '', label: srcName };
     });
-    const updated = { ...selected, mappings: newMappings };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, mappings: newMappings });
   };
 
   const populateFrom = (side: 'source' | 'target') => {
@@ -159,12 +206,10 @@ export default function ConversionsPage() {
         ? { sourceId: opt.id, targetId: '', label }
         : { sourceId: '', targetId: opt.id, label };
     });
-    const updated = { ...selected, mappings: newMappings };
-    persist(tables.map(t => t.id === selected.id ? updated : t));
-    setSelected(updated);
+    persistSelected({ ...selected, mappings: newMappings });
   };
 
-  const envName = (id: string) => envs.find(e => e.id === id)?.name ?? id;
+  const envName = (id: string) => allEnvs.find(e => e.id === id)?.name ?? id;
 
   const sortedSourceIds = useMemo(() => [...sourceIds].sort((a, b) =>
     sortBy === 'name'
@@ -182,15 +227,19 @@ export default function ConversionsPage() {
     if (!selected || editingName === null) return;
     const trimmed = editingName.trim();
     if (trimmed && trimmed !== selected.name) {
-      const updated = { ...selected, name: trimmed };
-      persist(tables.map(t => t.id === selected.id ? updated : t));
-      setSelected(updated);
+      persistSelected({ ...selected, name: trimmed });
     }
     setEditingName(null);
   };
 
+  // Combine local + server tables for the sidebar
+  const allTables: (ConversionTable & { _server?: boolean })[] = [
+    ...tables,
+    ...serverTables.map(t => ({ ...t, _server: true as const })),
+  ];
+
   // Group tables by source→target pair
-  const grouped = tables.reduce<Record<string, ConversionTable[]>>((acc, t) => {
+  const grouped = allTables.reduce<Record<string, typeof allTables>>((acc, t) => {
     const key = `${t.sourceEnvId}__${t.targetEnvId}`;
     if (!acc[key]) acc[key] = [];
     acc[key].push(t);
@@ -214,19 +263,22 @@ export default function ConversionsPage() {
         <h1 className="text-white font-semibold text-sm">Conversion Tables</h1>
         <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
-        <button onClick={() => setShowForm(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
-          New table
-        </button>
+        {isAdmin && (
+          <button onClick={() => setShowForm(true)} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
+            New table
+          </button>
+        )}
+        <UserBadge />
       </div>
 
       <div className="flex flex-1 min-h-0">
         {/* Table list — grouped by env pair */}
         <div className="w-80 shrink-0 border-r border-slate-700 overflow-y-auto">
-          {tables.length === 0 ? (
+          {allTables.length === 0 ? (
             <div className="p-6 text-center">
               <p className="text-slate-500 text-sm mb-3">No conversion tables yet.</p>
-              <button onClick={() => setShowForm(true)} className="text-blue-400 hover:text-blue-300 text-xs transition-colors">Create one →</button>
+              {isAdmin && <button onClick={() => setShowForm(true)} className="text-blue-400 hover:text-blue-300 text-xs transition-colors">Create one →</button>}
             </div>
           ) : (
             <div className="p-3 space-y-4">
@@ -243,15 +295,17 @@ export default function ConversionsPage() {
                         </svg>
                         <span className="text-emerald-300 text-xs font-medium truncate">{envName(tgtId)}</span>
                       </div>
-                      <button
-                        onClick={() => openNewForPair(srcId, tgtId)}
-                        title="Add table for this pair"
-                        className="text-slate-500 hover:text-blue-400 transition-colors shrink-0 ml-2"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => openNewForPair(srcId, tgtId)}
+                          title="Add table for this pair"
+                          className="text-slate-500 hover:text-blue-400 transition-colors shrink-0 ml-2"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          </svg>
+                        </button>
+                      )}
                     </div>
 
                     {/* Table cards */}
@@ -259,14 +313,17 @@ export default function ConversionsPage() {
                       {pairTables.map(t => (
                         <button
                           key={t.id}
-                          onClick={() => { setSelected(t); setSourceIds([]); setTargetIds([]); setLoadError(''); setEditingName(null); }}
+                          onClick={() => { setSelected(t); setIsServerTable(!!t._server); setSourceIds([]); setTargetIds([]); setLoadError(''); setEditingName(null); }}
                           className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${
                             selected?.id === t.id
                               ? 'bg-slate-700 border-slate-600'
                               : 'bg-slate-800/50 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600'
                           }`}
                         >
-                          <p className="text-white text-sm font-medium truncate">{t.name}</p>
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-white text-sm font-medium truncate">{t.name}</p>
+                            {t._server && <span className="text-xs px-1 rounded bg-emerald-900/50 text-emerald-400 shrink-0">server</span>}
+                          </div>
                           <p className="text-slate-500 text-xs font-mono mt-1 truncate">{t.fieldPaths.join(', ')}</p>
                           <p className="text-slate-600 text-xs mt-0.5">{t.mappings.length} mapping{t.mappings.length !== 1 ? 's' : ''}</p>
                         </button>
@@ -290,7 +347,7 @@ export default function ConversionsPage() {
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div className="min-w-0">
-                  {editingName !== null ? (
+                  {isAdmin && editingName !== null ? (
                     <input
                       autoFocus
                       value={editingName}
@@ -299,7 +356,7 @@ export default function ConversionsPage() {
                       onKeyDown={e => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditingName(null); }}
                       className="text-white text-lg font-semibold bg-slate-700 border border-blue-500 rounded px-2 py-0.5 focus:outline-none w-full max-w-sm"
                     />
-                  ) : (
+                  ) : isAdmin ? (
                     <button
                       onClick={() => setEditingName(selected.name)}
                       className="group flex items-center gap-1.5 text-white text-lg font-semibold hover:text-blue-300 transition-colors"
@@ -309,6 +366,8 @@ export default function ConversionsPage() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2.414a2 2 0 01.586-1.414z" />
                       </svg>
                     </button>
+                  ) : (
+                    <span className="text-white text-lg font-semibold">{selected.name}</span>
                   )}
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-blue-300">{envName(selected.sourceEnvId)}</span>
@@ -320,15 +379,17 @@ export default function ConversionsPage() {
                     {selected.fieldPaths.map((fp, i) => (
                       <span key={i} className="flex items-center gap-1 bg-slate-700 text-slate-300 text-xs px-2 py-0.5 rounded font-mono">
                         {fp}
-                        <button onClick={() => removeTablePath(i)} className="text-slate-500 hover:text-red-400 transition-colors ml-0.5">✕</button>
+                        {isAdmin && <button onClick={() => removeTablePath(i)} className="text-slate-500 hover:text-red-400 transition-colors ml-0.5">✕</button>}
                       </span>
                     ))}
-                    <AddPathInline onAdd={addTablePath} />
+                    {isAdmin && <AddPathInline onAdd={addTablePath} />}
                   </div>
                 </div>
-                <button onClick={() => deleteTable(selected.id)} className="text-xs text-slate-500 hover:text-red-400 px-2.5 py-1.5 border border-slate-700 rounded transition-colors">
-                  Delete table
-                </button>
+                {isAdmin && (
+                  <button onClick={() => deleteTable(selected.id)} className="text-xs text-slate-500 hover:text-red-400 px-2.5 py-1.5 border border-slate-700 rounded transition-colors">
+                    Delete table
+                  </button>
+                )}
               </div>
 
               {/* Load IDs from API */}
@@ -395,11 +456,7 @@ export default function ConversionsPage() {
                     <label key={opt.value} className="flex items-start gap-3 cursor-pointer group">
                       <input type="radio" name="fallback" value={opt.value}
                         checked={selected.fallback === opt.value}
-                        onChange={() => {
-                          const updated = { ...selected, fallback: opt.value };
-                          persist(tables.map(t => t.id === selected.id ? updated : t));
-                          setSelected(updated);
-                        }}
+                        onChange={() => persistSelected({ ...selected, fallback: opt.value })}
                         className="accent-blue-500 mt-0.5 shrink-0" />
                       <div>
                         <span className="text-sm text-slate-200">{opt.label}</span>
@@ -419,9 +476,7 @@ export default function ConversionsPage() {
                           value={selected.fallbackDefaultId ?? ''}
                           onChange={e => {
                             const opt = targetIds.find(o => o.id === e.target.value);
-                            const updated = { ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: opt?.label };
-                            persist(tables.map(t => t.id === selected.id ? updated : t));
-                            setSelected(updated);
+                            persistSelected({ ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: opt?.label });
                           }}
                           className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 min-w-[220px]"
                         >
@@ -431,11 +486,7 @@ export default function ConversionsPage() {
                       ) : (
                         <input type="text"
                           value={selected.fallbackDefaultId ?? ''}
-                          onChange={e => {
-                            const updated = { ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: undefined };
-                            persist(tables.map(t => t.id === selected.id ? updated : t));
-                            setSelected(updated);
-                          }}
+                          onChange={e => persistSelected({ ...selected, fallbackDefaultId: e.target.value, fallbackDefaultLabel: undefined })}
                           placeholder="type a target ID…"
                           className="bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 font-mono w-48 placeholder:text-slate-600" />
                       )}
@@ -508,9 +559,11 @@ export default function ConversionsPage() {
                   </div>
                 )}
 
-                <div className="px-4 py-3 border-t border-slate-700">
-                  <button onClick={addMapping} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Add mapping row</button>
-                </div>
+                {isAdmin && (
+                  <div className="px-4 py-3 border-t border-slate-700">
+                    <button onClick={addMapping} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Add mapping row</button>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -534,13 +587,26 @@ export default function ConversionsPage() {
                   placeholder="e.g. Locations FR → DE"
                   className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500 placeholder:text-slate-600" />
               </div>
+              {isAdmin && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-400 mb-1.5">Storage</label>
+                  <div className="flex gap-2">
+                    {(['local', 'server'] as const).map(t => (
+                      <button key={t} type="button" onClick={() => setFormTarget(t)}
+                        className={`flex-1 py-1.5 rounded text-xs font-medium border transition-colors ${formTarget === t ? (t === 'server' ? 'bg-emerald-700 border-emerald-600 text-white' : 'bg-blue-600 border-blue-600 text-white') : 'bg-slate-900 border-slate-600 text-slate-400 hover:border-slate-500'}`}>
+                        {t === 'server' ? 'Server (shared)' : 'Local (this browser)'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1.5">Source environment</label>
                   <select value={form.sourceEnvId} onChange={e => setForm({ ...form, sourceEnvId: e.target.value })}
                     className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500">
                     <option value="">— select —</option>
-                    {envs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                    {allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
                   </select>
                 </div>
                 <div>
@@ -548,7 +614,7 @@ export default function ConversionsPage() {
                   <select value={form.targetEnvId} onChange={e => setForm({ ...form, targetEnvId: e.target.value })}
                     className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500">
                     <option value="">— select —</option>
-                    {envs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                    {allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
                   </select>
                 </div>
               </div>

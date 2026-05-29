@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import {
   loadEnvironments, saveEnvironments, saveActiveConfig,
@@ -8,6 +8,9 @@ import {
   genId, type Environment, type ConversionTable,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
+import { useAuth } from '@/components/AuthContext';
+import UserBadge from '@/components/UserBadge';
+import type { ServerEnvironment } from '@/lib/data-store';
 
 const EMPTY: Omit<Environment, 'id'> = { name: '', baseUrl: '', username: '', password: '' };
 
@@ -18,10 +21,20 @@ interface ConfigBundle {
   conversionTables: ConversionTable[];
 }
 
+type StorageTarget = 'local' | 'server';
+
 export default function EnvironmentsPage() {
-  const [envs, setEnvs]       = useState<Environment[]>([]);
+  const { user } = useAuth();
+  const isAdmin = user?.profile === 'admin';
+
+  // Local environments
+  const [envs, setEnvs] = useState<Environment[]>([]);
+  // Server environments
+  const [serverEnvs, setServerEnvs] = useState<ServerEnvironment[]>([]);
+
   const [editing, setEditing] = useState<Environment | null>(null);
-  const [isNew, setIsNew]     = useState(false);
+  const [editTarget, setEditTarget] = useState<StorageTarget>('local');
+  const [isNew, setIsNew] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
@@ -30,28 +43,63 @@ export default function EnvironmentsPage() {
   const [importError, setImportError]   = useState('');
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { setEnvs(loadEnvironments()); }, []);
+  const loadServerEnvs = useCallback(() => {
+    fetch('/api/server-envs').then(r => r.json()).then(setServerEnvs).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setEnvs(loadEnvironments());
+    loadServerEnvs();
+  }, [loadServerEnvs]);
+
+  // ─── Local env helpers ─────────────────────────────────────────────────────
 
   const persist = (updated: Environment[]) => { saveEnvironments(updated); setEnvs(updated); };
+  const openNew = (target: StorageTarget = 'local') => { setEditing({ id: genId(), ...EMPTY }); setIsNew(true); setEditTarget(target); };
+  const openEdit = (env: Environment, target: StorageTarget) => { setEditing({ ...env }); setIsNew(false); setEditTarget(target); };
 
-  const openNew  = () => { setEditing({ id: genId(), ...EMPTY }); setIsNew(true); };
-  const openEdit = (env: Environment) => { setEditing({ ...env }); setIsNew(false); };
-
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!editing) return;
     if (!editing.name.trim() || !editing.baseUrl.trim()) return;
-    persist(isNew ? [...envs, editing] : envs.map(e => e.id === editing.id ? editing : e));
+
+    if (editTarget === 'server') {
+      if (isNew) {
+        const res = await fetch('/api/server-envs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: editing.name, baseUrl: editing.baseUrl, username: editing.username, password: editing.password }),
+        });
+        if (res.ok) loadServerEnvs();
+      } else {
+        await fetch(`/api/server-envs/${editing.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: editing.name, baseUrl: editing.baseUrl, username: editing.username, password: editing.password }),
+        });
+        loadServerEnvs();
+      }
+    } else {
+      persist(isNew ? [...envs, editing] : envs.map(e => e.id === editing.id ? editing : e));
+    }
     setEditing(null);
   };
 
-  const remove = (id: string) => { if (confirm('Delete this environment?')) persist(envs.filter(e => e.id !== id)); };
-
-  const activate = (env: Environment) => {
-    saveActiveConfig({ baseUrl: env.baseUrl, username: env.username, password: env.password });
-    alert(`"${env.name}" is now the active environment. Reload the main page to see it applied.`);
+  const remove = (id: string) => {
+    if (confirm('Delete this environment?')) persist(envs.filter(e => e.id !== id));
   };
 
-  const testEnv = async (env: Environment) => {
+  const removeServer = async (id: string) => {
+    if (!confirm('Delete this server environment?')) return;
+    await fetch(`/api/server-envs/${id}`, { method: 'DELETE' });
+    loadServerEnvs();
+  };
+
+  const activate = (env: Environment | ServerEnvironment) => {
+    saveActiveConfig({ baseUrl: env.baseUrl, username: env.username, password: env.password });
+    alert(`"${env.name}" is now the active environment.`);
+  };
+
+  const testEnv = async (env: Environment | ServerEnvironment) => {
     setTesting(env.id);
     const url = `${env.baseUrl.replace(/\/$/, '')}/api/getServerTime`;
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -66,7 +114,7 @@ export default function EnvironmentsPage() {
     } finally { setTesting(null); }
   };
 
-  // ─── Export ───────────────────────────────────────────────────────────────
+  // ─── Export ────────────────────────────────────────────────────────────────
 
   const exportConfig = () => {
     const bundle: ConfigBundle = {
@@ -84,7 +132,7 @@ export default function EnvironmentsPage() {
     URL.revokeObjectURL(url);
   };
 
-  // ─── Import ───────────────────────────────────────────────────────────────
+  // ─── Import ────────────────────────────────────────────────────────────────
 
   const onImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -108,14 +156,12 @@ export default function EnvironmentsPage() {
 
   const applyImport = (mode: 'merge' | 'replace') => {
     if (!importBundle) return;
-
     if (mode === 'replace') {
-      if (!confirm(`This will overwrite all current environments and conversion tables. Continue?`)) return;
+      if (!confirm('This will overwrite all current environments and conversion tables. Continue?')) return;
       saveEnvironments(importBundle.environments);
       saveConversionTables(importBundle.conversionTables);
       setEnvs(importBundle.environments);
     } else {
-      // Merge: assign fresh IDs to everything; remap env refs in tables
       const idMap = new Map<string, string>();
       const newEnvs = importBundle.environments.map(e => {
         const newId = genId();
@@ -128,16 +174,60 @@ export default function EnvironmentsPage() {
         sourceEnvId: idMap.get(t.sourceEnvId) ?? t.sourceEnvId,
         targetEnvId: idMap.get(t.targetEnvId) ?? t.targetEnvId,
       }));
-
-      const mergedEnvs    = [...loadEnvironments(), ...newEnvs];
-      const mergedTables  = [...loadConversionTables(), ...newTables];
+      const mergedEnvs = [...loadEnvironments(), ...newEnvs];
+      const mergedTables = [...loadConversionTables(), ...newTables];
       saveEnvironments(mergedEnvs);
       saveConversionTables(mergedTables);
       setEnvs(mergedEnvs);
     }
-
     setImportBundle(null);
   };
+
+  // ─── Env card ──────────────────────────────────────────────────────────────
+
+  const EnvCard = ({ env, target }: { env: Environment | ServerEnvironment; target: StorageTarget }) => (
+    <div className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-white font-medium">{env.name}</p>
+            <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${target === 'server' ? 'bg-emerald-900/50 text-emerald-400' : 'bg-slate-700 text-slate-400'}`}>
+              {target === 'server' ? 'server' : 'local'}
+            </span>
+          </div>
+          <p className="text-slate-400 text-xs font-mono mt-0.5 truncate">{env.baseUrl}</p>
+          {env.username && <p className="text-slate-500 text-xs mt-0.5">User: {env.username}</p>}
+          {testResults[env.id] && (
+            <p className={`text-xs mt-1 ${testResults[env.id].ok ? 'text-emerald-400' : 'text-red-400'}`}>
+              {testResults[env.id].ok ? '✓' : '✗'} {testResults[env.id].msg}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={() => testEnv(env)} disabled={testing === env.id}
+            className="text-xs text-slate-400 hover:text-white px-2.5 py-1.5 border border-slate-600 hover:border-slate-500 rounded transition-colors disabled:opacity-50">
+            {testing === env.id ? '…' : 'Test'}
+          </button>
+          <button onClick={() => activate(env)}
+            className="text-xs text-blue-400 hover:text-white px-2.5 py-1.5 border border-blue-500/40 hover:border-blue-400 rounded transition-colors">
+            Activate
+          </button>
+          {isAdmin && (
+            <>
+              <button onClick={() => openEdit(env as Environment, target)}
+                className="text-xs text-slate-400 hover:text-white px-2.5 py-1.5 border border-slate-600 rounded transition-colors">
+                Edit
+              </button>
+              <button onClick={() => target === 'server' ? removeServer(env.id) : remove(env.id)}
+                className="text-xs text-slate-500 hover:text-red-400 px-2.5 py-1.5 border border-slate-700 rounded transition-colors">
+                Delete
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-900 text-white">
@@ -151,29 +241,35 @@ export default function EnvironmentsPage() {
         <span className="text-slate-600 text-xs font-mono">v{APP_VERSION}</span>
         <div className="flex-1" />
 
-        {/* Import */}
-        <input ref={importFileRef} type="file" accept=".json" className="hidden" onChange={onImportFile} />
-        <button
-          onClick={() => importFileRef.current?.click()}
-          className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-          Import
-        </button>
-
-        {/* Export */}
-        <button
-          onClick={exportConfig}
-          className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-          Export
-        </button>
-
-        <button onClick={openNew} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
-          New environment
-        </button>
+        {isAdmin && (
+          <>
+            {/* Import local */}
+            <input ref={importFileRef} type="file" accept=".json" className="hidden" onChange={onImportFile} />
+            <button
+              onClick={() => importFileRef.current?.click()}
+              className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              Import
+            </button>
+            <button
+              onClick={exportConfig}
+              className="flex items-center gap-1.5 text-slate-400 hover:text-white border border-slate-600 hover:border-slate-500 text-xs px-3 py-1.5 rounded transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              Export
+            </button>
+            <button onClick={() => openNew('server')} className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-600 text-white text-xs px-3 py-1.5 rounded transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
+              New server env
+            </button>
+            <button onClick={() => openNew('local')} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/></svg>
+              New local env
+            </button>
+          </>
+        )}
+        <UserBadge />
       </div>
 
       {importError && (
@@ -182,51 +278,37 @@ export default function EnvironmentsPage() {
         </div>
       )}
 
-      <div className="max-w-3xl mx-auto px-5 py-8">
-        {envs.length === 0 ? (
-          <div className="text-center py-16">
-            <svg className="w-12 h-12 text-slate-700 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2"/></svg>
-            <p className="text-slate-500 mb-4">No environments saved yet.</p>
-            <button onClick={openNew} className="text-blue-400 hover:text-blue-300 text-sm transition-colors">Add your first environment →</button>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {envs.map(env => (
-              <div key={env.id} className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-white font-medium">{env.name}</p>
-                    <p className="text-slate-400 text-xs font-mono mt-0.5 truncate">{env.baseUrl}</p>
-                    {env.username && <p className="text-slate-500 text-xs mt-0.5">User: {env.username}</p>}
-                    {testResults[env.id] && (
-                      <p className={`text-xs mt-1 ${testResults[env.id].ok ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {testResults[env.id].ok ? '✓' : '✗'} {testResults[env.id].msg}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button onClick={() => testEnv(env)} disabled={testing === env.id}
-                      className="text-xs text-slate-400 hover:text-white px-2.5 py-1.5 border border-slate-600 hover:border-slate-500 rounded transition-colors disabled:opacity-50">
-                      {testing === env.id ? '…' : 'Test'}
-                    </button>
-                    <button onClick={() => activate(env)}
-                      className="text-xs text-blue-400 hover:text-white px-2.5 py-1.5 border border-blue-500/40 hover:border-blue-400 rounded transition-colors">
-                      Activate
-                    </button>
-                    <button onClick={() => openEdit(env)}
-                      className="text-xs text-slate-400 hover:text-white px-2.5 py-1.5 border border-slate-600 rounded transition-colors">
-                      Edit
-                    </button>
-                    <button onClick={() => remove(env.id)}
-                      className="text-xs text-slate-500 hover:text-red-400 px-2.5 py-1.5 border border-slate-700 rounded transition-colors">
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="max-w-3xl mx-auto px-5 py-8 space-y-8">
+        {/* Server environments */}
+        <section>
+          <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">Server environments</h2>
+          {serverEnvs.length === 0 ? (
+            <p className="text-slate-500 text-sm">
+              {isAdmin ? 'No server environments yet. Create one to share it with users.' : 'No server environments available.'}
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {serverEnvs.map(env => <EnvCard key={env.id} env={env} target="server" />)}
+            </div>
+          )}
+        </section>
+
+        {/* Local environments */}
+        <section>
+          <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-3">Local environments (this browser only)</h2>
+          {envs.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-slate-500 mb-3">No local environments saved.</p>
+              {isAdmin && (
+                <button onClick={() => openNew('local')} className="text-blue-400 hover:text-blue-300 text-sm transition-colors">Add a local environment →</button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {envs.map(env => <EnvCard key={env.id} env={env} target="local" />)}
+            </div>
+          )}
+        </section>
       </div>
 
       {/* Edit/New modal */}
@@ -234,7 +316,12 @@ export default function EnvironmentsPage() {
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-slate-800 border border-slate-600 rounded-lg shadow-2xl w-full max-w-md">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700">
-              <h2 className="text-white font-semibold">{isNew ? 'New environment' : 'Edit environment'}</h2>
+              <div>
+                <h2 className="text-white font-semibold">{isNew ? 'New environment' : 'Edit environment'}</h2>
+                <span className={`text-xs font-medium ${editTarget === 'server' ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {editTarget === 'server' ? 'Stored on server — shared with users' : 'Stored locally — this browser only'}
+                </span>
+              </div>
               <button onClick={() => setEditing(null)} className="text-slate-400 hover:text-white">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
@@ -277,9 +364,7 @@ export default function EnvironmentsPage() {
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
-
             <div className="p-5 space-y-4">
-              {/* File summary */}
               <div className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 space-y-1 text-sm">
                 {importBundle.exportedAt && (
                   <p className="text-slate-500 text-xs">Exported {new Date(importBundle.exportedAt).toLocaleString()} · v{importBundle.version}</p>
@@ -297,27 +382,20 @@ export default function EnvironmentsPage() {
                   )}
                 </p>
               </div>
-
-              {/* Mode choice */}
-              <p className="text-slate-400 text-xs">How do you want to apply this?</p>
+              <p className="text-slate-400 text-xs">These will be imported as local environments.</p>
               <div className="space-y-2">
-                <button
-                  onClick={() => applyImport('merge')}
-                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg transition-colors"
-                >
+                <button onClick={() => applyImport('merge')}
+                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-lg transition-colors">
                   <p className="text-white text-sm font-medium">Merge — add alongside existing</p>
-                  <p className="text-slate-400 text-xs mt-0.5">All imported items are added as new entries. Nothing is deleted. Conversion table references are remapped to the new environment IDs.</p>
+                  <p className="text-slate-400 text-xs mt-0.5">All imported items are added as new entries. Nothing is deleted.</p>
                 </button>
-                <button
-                  onClick={() => applyImport('replace')}
-                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-red-900/30 border border-slate-600 hover:border-red-500/40 rounded-lg transition-colors"
-                >
+                <button onClick={() => applyImport('replace')}
+                  className="w-full text-left px-4 py-3 bg-slate-700 hover:bg-red-900/30 border border-slate-600 hover:border-red-500/40 rounded-lg transition-colors">
                   <p className="text-red-300 text-sm font-medium">Replace — overwrite everything</p>
-                  <p className="text-slate-400 text-xs mt-0.5">All current environments and conversion tables are replaced. This cannot be undone.</p>
+                  <p className="text-slate-400 text-xs mt-0.5">All current local environments and conversion tables are replaced.</p>
                 </button>
               </div>
             </div>
-
             <div className="px-5 pb-5 flex justify-end">
               <button onClick={() => setImportBundle(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
             </div>

@@ -4,3 +4,11 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - DATA_DIR=/data
+    volumes:
+      - ubilaundry-data:/data
+
+volumes:
+  ubilaundry-data:
