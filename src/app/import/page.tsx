@@ -223,6 +223,99 @@ function parseExcelFile(file: File): Promise<Row[]> {
 
 interface CSVMeta { file: File; headers: string[]; sep: string; }
 
+// ─── Pure helpers used by both single-batch and all-batch operations ──────────
+
+type PayloadResult = { payload: Record<string, unknown>; errors: string[]; notes: ConversionNote[] };
+
+function computePayloads(
+  batchRows: Row[],
+  tables: ConversionTable[],
+  reassign: boolean,
+  returnValue: boolean,
+): PayloadResult[] {
+  return batchRows.map(r => {
+    if (tables.length > 0) {
+      const result = applyConversions(r as Record<string, unknown>, tables);
+      return { payload: buildPayload(result.converted as Record<string, unknown>, reassign, returnValue), errors: result.errors, notes: result.notes };
+    }
+    return { payload: buildPayload(r as Record<string, unknown>, reassign, returnValue), errors: [] as string[], notes: [] as ConversionNote[] };
+  });
+}
+
+const SQL_NULL = 'NULL';
+function sqlInt(v: unknown): string {
+  if (v === null || v === undefined || v === '' || String(v) === 'NULL') return SQL_NULL;
+  const n = parseInt(String(v), 10);
+  return isNaN(n) ? SQL_NULL : String(n);
+}
+function sqlStr(v: unknown): string {
+  if (v === null || v === undefined || v === '' || String(v) === 'NULL') return SQL_NULL;
+  const s = String(v).trim();
+  return s ? `'${s.replace(/'/g, "''")}'` : SQL_NULL;
+}
+function nestedSqlId(item: Record<string, unknown>, field: string): string {
+  const val = item[field];
+  if (!val || typeof val !== 'object') return SQL_NULL;
+  return sqlInt((val as Record<string, unknown>).id);
+}
+const DB_COLS = [
+  'id', 'encodingdate', 'firstseendate', 'lastseendate', 'washingcycleseed',
+  'category_id', 'lastmovementtypeid', 'lastreportlocationid',
+  'lastseenlocationid', 'lastseenworkstationid', 'hs', 'killed', 'reformed',
+];
+function buildSQLRows(
+  batchRows: Row[],
+  payloads: PayloadResult[],
+): { valueRows: string[]; idValues: string[]; skipped: number } {
+  const valueRows: string[] = [];
+  const idValues: string[] = [];
+  let skipped = 0;
+  for (let i = 0; i < batchRows.length; i++) {
+    const { payload, errors } = payloads[i];
+    if (errors.length > 0) { skipped++; continue; }
+    const item = (payload.item ?? {}) as Record<string, unknown>;
+    const id = sqlStr(item.id);
+    if (id === SQL_NULL) { skipped++; continue; }
+    idValues.push(id);
+    valueRows.push([
+      id, sqlStr(item.encodingDate), sqlStr(item.firstSeenDate), sqlStr(item.lastSeenDate),
+      sqlInt(item.washingCycleSeed), nestedSqlId(item, 'category'), nestedSqlId(item, 'lastMovementType'),
+      nestedSqlId(item, 'lastReportLocation'), nestedSqlId(item, 'lastSeenLocation'),
+      nestedSqlId(item, 'lastSeenWorkstation'), 'false', 'false', 'false',
+    ].join(', '));
+  }
+  return { valueRows, idValues, skipped };
+}
+function appendSQLInserts(
+  valueRows: string[], idValues: string[],
+  tableName: string, subTableName: string, upsert: boolean,
+  lines: string[],
+): void {
+  const colList = DB_COLS.join(', ');
+  const conflictCols = DB_COLS.filter(c => c !== 'id').map(c => `  ${c} = EXCLUDED.${c}`).join(',\n');
+  const BATCH = 500;
+  for (let b = 0; b < valueRows.length; b += BATCH) {
+    const batch = valueRows.slice(b, b + BATCH);
+    lines.push(`INSERT INTO ${tableName || 'item'} (${colList})`);
+    lines.push('VALUES');
+    lines.push(batch.map((v, i) => `  (${v})${i < batch.length - 1 ? ',' : ''}`).join('\n'));
+    if (upsert) { lines.push('ON CONFLICT (id) DO UPDATE SET'); lines.push(conflictCols); }
+    lines.push(';');
+    lines.push('');
+  }
+  if (subTableName.trim()) {
+    const sub = subTableName.trim();
+    for (let b = 0; b < idValues.length; b += BATCH) {
+      const batch = idValues.slice(b, b + BATCH);
+      lines.push(`INSERT INTO ${sub} (id)`);
+      lines.push('VALUES');
+      lines.push(batch.map((v, i) => `  (${v})${i < batch.length - 1 ? ',' : ''}`).join('\n'));
+      lines.push('ON CONFLICT (id) DO NOTHING;');
+      lines.push('');
+    }
+  }
+}
+
 const STATUS_ICON: Record<RowStatus, ReactElement> = {
   pending: <span className="w-4 h-4 rounded-full border border-slate-600 inline-block" />,
   running: (
@@ -282,6 +375,9 @@ export default function ImportPage() {
   const [sqlSubTableName, setSqlSubTableName]     = useState('item_laundry');
   const [sqlUpsert, setSqlUpsert]                 = useState(true);
 
+  const [autoMode, setAutoMode]     = useState<'import' | 'sql' | null>(null);
+  const [autoBatchNum, setAutoBatchNum] = useState(0);
+
   const abortRef        = useRef(false);
   const fileRef         = useRef<HTMLInputElement>(null);
   const pendingRef      = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -302,18 +398,9 @@ export default function ImportPage() {
     [applicableTables, selectedTableIds]
   );
 
-  const previewPayloads = useMemo(() =>
-    rows.map(r => {
-      // Apply conversions to the flat CSV row first (paths match CSV column names),
-      // then build the nested assignment payload from the converted row.
-      if (activeTables.length > 0) {
-        const result = applyConversions(r as Record<string, unknown>, activeTables);
-        const payload = buildPayload(result.converted as Record<string, unknown>, reassign, returnValue);
-        return { payload, errors: result.errors, notes: result.notes };
-      }
-      return { payload: buildPayload(r as Record<string, unknown>, reassign, returnValue), errors: [] as string[], notes: [] as ConversionNote[] };
-    }),
-    [rows, reassign, returnValue, activeTables]
+  const previewPayloads = useMemo(
+    () => computePayloads(rows, activeTables, reassign, returnValue),
+    [rows, reassign, returnValue, activeTables],
   );
 
   const loadFile = useCallback(async (file: File) => {
@@ -370,23 +457,17 @@ export default function ImportPage() {
     if (file) loadFile(file);
   };
 
-  const runImport = async () => {
-    if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
-    if (rows.length === 0) return;
-    setShowPreview(false);
-    abortRef.current = false;
+  // Core sending logic — used by both single-batch and all-batches import.
+  const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]) => {
     setRunning(true);
     setDone(false);
     setExpandedIdx(null);
-
-    const initial: RowResult[] = rows.map((row) => ({ row, status: 'pending' }));
-    setResults(initial);
+    setResults(targetRows.map(row => ({ row, status: 'pending' as RowStatus })));
 
     const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
-    // Buffer updates and flush in batches to avoid a re-render per row
     pendingRef.current.clear();
     const update = (index: number, patch: Partial<RowResult>) => {
       const prev = pendingRef.current.get(index) ?? {};
@@ -396,28 +477,18 @@ export default function ImportPage() {
       if (pendingRef.current.size === 0) return;
       const snapshot = new Map(pendingRef.current);
       pendingRef.current.clear();
-      setResults(prev => prev.map((r, i) => {
-        const p = snapshot.get(i); return p ? { ...r, ...p } : r;
-      }));
+      setResults(prev => prev.map((r, i) => { const p = snapshot.get(i); return p ? { ...r, ...p } : r; }));
     };
     const interval = setInterval(flush, 200);
-
     let cursor = 0;
-    const total = rows.length;
 
     const processOne = async (index: number) => {
       if (abortRef.current) { update(index, { status: 'skipped', message: 'Cancelled' }); return; }
-      const row = rows[index];
+      const row = targetRows[index];
       if (!row.id || String(row.id).trim() === '') { update(index, { status: 'skipped', message: 'Missing id' }); return; }
       update(index, { status: 'running' });
-
-      const { payload, errors: convErrors } = previewPayloads[index];
-
-      if (convErrors.length > 0) {
-        update(index, { status: 'error', message: convErrors.join('; '), payload });
-        return;
-      }
-
+      const { payload, errors: convErrors } = targetPayloads[index];
+      if (convErrors.length > 0) { update(index, { status: 'error', message: convErrors.join('; '), payload }); return; }
       try {
         const t0 = Date.now();
         const res = await fetch('/api/proxy', {
@@ -443,15 +514,70 @@ export default function ImportPage() {
       }
     };
 
-    const worker = async () => { while (true) { const idx = cursor++; if (idx >= total) break; await processOne(idx); } };
-    await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+    const worker = async () => { while (true) { const idx = cursor++; if (idx >= targetRows.length) break; await processOne(idx); } };
+    await Promise.all(Array.from({ length: Math.min(concurrency, targetRows.length) }, () => worker()));
     clearInterval(interval);
     flush();
     setRunning(false);
     setDone(true);
   };
 
-  const stop  = () => { abortRef.current = true; };
+  const runImport = async () => {
+    if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
+    if (rows.length === 0) return;
+    setShowPreview(false);
+    abortRef.current = false;
+    await sendBatch(rows, previewPayloads);
+  };
+
+  const runAllBatchesImport = async () => {
+    if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
+    setShowPreview(false);
+    abortRef.current = false;
+    setAutoMode('import');
+
+    let batchIdx = currentBatch;
+    let batchRows = rows;
+    // nextLoadOffset: byte position in CSV file where the next batch to load starts
+    let nextLoadOffset: number = csvMeta ? (batchOffsets[batchIdx + 1] ?? 0) : 0;
+    let stillHasMore = hasMoreBatches;
+
+    while (true) {
+      setRows(batchRows);
+      setCurrentBatch(batchIdx);
+      setAutoBatchNum(batchIdx + 1);
+      await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+
+      if (abortRef.current || !stillHasMore) break;
+
+      setResults([]);
+      setDone(false);
+
+      let nextRows: Row[] = [];
+      if (csvMeta) {
+        const result = await loadCSVBatch(csvMeta.file, csvMeta.headers, csvMeta.sep, nextLoadOffset);
+        nextRows = result.rows;
+        stillHasMore = result.hasMore;
+        if (result.hasMore) {
+          setBatchOffsets(prev => { const n = [...prev]; n[batchIdx + 2] = result.nextOffset; return n; });
+          nextLoadOffset = result.nextOffset;
+        }
+      } else {
+        const all = allExcelRowsRef.current;
+        nextRows = all.slice((batchIdx + 1) * BATCH_SIZE, (batchIdx + 2) * BATCH_SIZE);
+        stillHasMore = (batchIdx + 2) * BATCH_SIZE < all.length;
+      }
+
+      if (nextRows.length === 0) { setHasMoreBatches(false); break; }
+      batchIdx++;
+      setHasMoreBatches(stillHasMore);
+      batchRows = nextRows;
+    }
+
+    setAutoMode(null);
+  };
+
+  const stop = () => { abortRef.current = true; };
 
   const switchBatch = useCallback(async (idx: number) => {
     if (running) return;
@@ -567,70 +693,8 @@ export default function ImportPage() {
 
   const generateSQL = () => {
     if (rows.length === 0) return;
-
-    // CSV column → DB column mapping
-    // Nested-id fields: value is item.field.id in the payload
-    // Plain fields: value is item.field directly
-    const sqlNull = 'NULL';
-    const sqlInt = (v: unknown): string => {
-      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
-      const n = parseInt(String(v), 10);
-      return isNaN(n) ? sqlNull : String(n);
-    };
-    // item id is always a VARCHAR/TEXT column — always quote
-    const sqlId = (v: unknown): string => {
-      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
-      const s = String(v).trim();
-      return s ? `'${s.replace(/'/g, "''")}'` : sqlNull;
-    };
-    const sqlDate = (v: unknown): string => {
-      if (v === null || v === undefined || v === '' || String(v) === 'NULL') return sqlNull;
-      const s = String(v).trim();
-      return s ? `'${s.replace(/'/g, "''")}'` : sqlNull;
-    };
-    const nestedId = (item: Record<string, unknown>, field: string): string => {
-      const val = item[field];
-      if (!val || typeof val !== 'object') return sqlNull;
-      return sqlInt((val as Record<string, unknown>).id);
-    };
-
-    const DB_COLS = [
-      'id', 'encodingdate', 'firstseendate', 'lastseendate', 'washingcycleseed',
-      'category_id', 'lastmovementtypeid', 'lastreportlocationid',
-      'lastseenlocationid', 'lastseenworkstationid', 'hs', 'killed', 'reformed',
-    ];
-
-    const valueRows: string[] = [];
-    const idValues:  string[] = []; // tracked separately for the subclass table
-    let skipped = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const { payload, errors } = previewPayloads[i];
-      if (errors.length > 0) { skipped++; continue; }
-      const item = (payload.item ?? {}) as Record<string, unknown>;
-      const id = sqlId(item.id);
-      if (id === sqlNull) { skipped++; continue; } // no id → skip
-      idValues.push(id);
-      valueRows.push([
-        id,
-        sqlDate(item.encodingDate),
-        sqlDate(item.firstSeenDate),
-        sqlDate(item.lastSeenDate),
-        sqlInt(item.washingCycleSeed),
-        nestedId(item, 'category'),
-        nestedId(item, 'lastMovementType'),
-        nestedId(item, 'lastReportLocation'),
-        nestedId(item, 'lastSeenLocation'),
-        nestedId(item, 'lastSeenWorkstation'),
-        'false', 'false', 'false', // hs, killed, reformed
-      ].join(', '));
-    }
-
+    const { valueRows, idValues, skipped } = buildSQLRows(rows, previewPayloads);
     if (valueRows.length === 0) { alert('No valid rows to export (all have conversion errors).'); return; }
-
-    const colList = DB_COLS.join(', ');
-    const conflictCols = DB_COLS.filter(c => c !== 'id').map(c => `  ${c} = EXCLUDED.${c}`).join(',\n');
-    const BATCH = 500;
     const lines: string[] = [
       `-- UbiLaundry item import`,
       `-- Generated : ${new Date().toISOString()}`,
@@ -638,39 +702,65 @@ export default function ImportPage() {
       `-- Rows      : ${valueRows.length}${skipped > 0 ? ` (${skipped} skipped — conversion errors)` : ''}`,
       '',
     ];
-
-    // Block 1 — main table
-    for (let b = 0; b < valueRows.length; b += BATCH) {
-      const batch = valueRows.slice(b, b + BATCH);
-      lines.push(`INSERT INTO ${sqlTableName || 'item'} (${colList})`);
-      lines.push('VALUES');
-      lines.push(batch.map((v, idx) => `  (${v})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
-      if (sqlUpsert) {
-        lines.push('ON CONFLICT (id) DO UPDATE SET');
-        lines.push(conflictCols);
-      }
-      lines.push(';');
-      lines.push('');
-    }
-
-    // Block 2 — subclass table (id only)
-    if (sqlSubTableName.trim()) {
-      const subName = sqlSubTableName.trim();
-      for (let b = 0; b < idValues.length; b += BATCH) {
-        const batch = idValues.slice(b, b + BATCH);
-        lines.push(`INSERT INTO ${subName} (id)`);
-        lines.push('VALUES');
-        lines.push(batch.map((v, idx) => `  (${v})${idx < batch.length - 1 ? ',' : ''}`).join('\n'));
-        lines.push('ON CONFLICT (id) DO NOTHING;');
-        lines.push('');
-      }
-    }
-
+    appendSQLInserts(valueRows, idValues, sqlTableName, sqlSubTableName, sqlUpsert, lines);
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
     a.download = `ubilaundry-import-${new Date().toISOString().slice(0, 10)}.sql`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const generateAllBatchesSQL = async () => {
+    setAutoMode('sql');
+    setAutoBatchNum(0);
+    const allValueRows: string[] = [];
+    const allIdValues: string[] = [];
+    let totalSkipped = 0;
+    let batchIdx = 0;
+    // Always re-read from the beginning so we get every batch regardless of where the user is
+    let csvOffset = csvMeta ? batchOffsets[0] : 0;
+    let stillHasMore = true;
+
+    while (stillHasMore) {
+      setAutoBatchNum(batchIdx + 1);
+      let batchRows: Row[];
+      if (csvMeta) {
+        const result = await loadCSVBatch(csvMeta.file, csvMeta.headers, csvMeta.sep, csvOffset);
+        batchRows = result.rows;
+        stillHasMore = result.hasMore;
+        csvOffset = result.nextOffset;
+      } else {
+        const all = allExcelRowsRef.current;
+        batchRows = all.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
+        stillHasMore = (batchIdx + 1) * BATCH_SIZE < all.length;
+      }
+      if (batchRows.length === 0) break;
+      const payloads = computePayloads(batchRows, activeTables, reassign, returnValue);
+      const { valueRows, idValues, skipped } = buildSQLRows(batchRows, payloads);
+      allValueRows.push(...valueRows);
+      allIdValues.push(...idValues);
+      totalSkipped += skipped;
+      batchIdx++;
+    }
+
+    setAutoMode(null);
+
+    if (allValueRows.length === 0) { alert('No valid rows to export.'); return; }
+    const lines: string[] = [
+      `-- UbiLaundry item import (all batches)`,
+      `-- Generated : ${new Date().toISOString()}`,
+      `-- Source    : ${fileName}`,
+      `-- Rows      : ${allValueRows.length}${totalSkipped > 0 ? ` (${totalSkipped} skipped — conversion errors)` : ''}`,
+      '',
+    ];
+    appendSQLInserts(allValueRows, allIdValues, sqlTableName, sqlSubTableName, sqlUpsert, lines);
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ubilaundry-import-all-${new Date().toISOString().slice(0, 10)}.sql`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -712,16 +802,23 @@ export default function ImportPage() {
             ${dragging ? 'border-blue-400 bg-blue-400/5' : rows.length > 0 ? 'border-slate-700 cursor-default' : 'border-slate-700 hover:border-slate-500'}`}
         >
           <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={onFileChange} />
-          {parsing ? (
+          {parsing || autoMode ? (
             <div className="flex items-center justify-center gap-3">
-              <svg className="w-6 h-6 animate-spin text-blue-400" fill="none" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 animate-spin text-blue-400 shrink-0" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
               <div className="text-left">
                 <p className="text-white font-medium">{fileName}</p>
-                <p className="text-slate-400 text-sm">Parsing file…</p>
+                {autoMode === 'import' && <p className="text-blue-400 text-sm">Importing batch {autoBatchNum}…</p>}
+                {autoMode === 'sql'    && <p className="text-emerald-400 text-sm">Reading batch {autoBatchNum} for SQL export…</p>}
+                {!autoMode            && <p className="text-slate-400 text-sm">Parsing file…</p>}
               </div>
+              {autoMode === 'import' && (
+                <button onClick={stop} className="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-400/30 rounded">
+                  Stop
+                </button>
+              )}
             </div>
           ) : rows.length > 0 ? (
             <div className="flex flex-wrap items-center justify-center gap-3">
@@ -904,12 +1001,13 @@ export default function ImportPage() {
             )}
 
             {/* Action buttons */}
-            {results.length === 0 && (
-              <div className="flex justify-end gap-3">
+            {results.length === 0 && !autoMode && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {/* Preview — single batch only */}
                 <button
                   onClick={() => { setPreviewIdx(0); setShowPreview(true); }}
                   disabled={!config.baseUrl}
-                  className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-lg transition-colors"
+                  className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white font-medium px-4 py-2.5 rounded-lg transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -917,27 +1015,54 @@ export default function ImportPage() {
                   </svg>
                   Preview payloads
                 </button>
+
+                {/* SQL export buttons */}
                 <button
                   onClick={generateSQL}
-                  className="flex items-center gap-2 bg-slate-700 hover:bg-emerald-800 text-emerald-300 font-medium px-5 py-2.5 rounded-lg transition-colors"
+                  className="flex items-center gap-2 bg-slate-700 hover:bg-emerald-900 text-emerald-300 font-medium px-4 py-2.5 rounded-lg transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   </svg>
-                  Download SQL
+                  {(hasMoreBatches || currentBatch > 0) ? 'SQL — this batch' : 'Download SQL'}
                 </button>
+                {(hasMoreBatches || currentBatch > 0) && (
+                  <button
+                    onClick={generateAllBatchesSQL}
+                    className="flex items-center gap-2 bg-emerald-900/60 hover:bg-emerald-800 text-emerald-300 font-medium px-4 py-2.5 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12v1a3 3 0 003 3h10a3 3 0 003-3v-1" />
+                    </svg>
+                    SQL — all batches
+                  </button>
+                )}
+
+                {/* Import buttons */}
                 <button
                   onClick={runImport}
                   disabled={running || !config.baseUrl}
-                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium px-6 py-2.5 rounded-lg transition-colors"
+                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium px-5 py-2.5 rounded-lg transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                   </svg>
-                  {(hasMoreBatches || currentBatch > 0)
-                    ? `Import batch ${currentBatch + 1} (${rows.length} items)`
-                    : `Import ${rows.length} items`}
+                  {(hasMoreBatches || currentBatch > 0) ? `Import batch ${currentBatch + 1}` : `Import ${rows.length} items`}
                 </button>
+                {(hasMoreBatches || currentBatch > 0) && (
+                  <button
+                    onClick={runAllBatchesImport}
+                    disabled={running || !config.baseUrl}
+                    className="flex items-center gap-2 bg-blue-800 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 text-white font-medium px-5 py-2.5 rounded-lg transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12v1a3 3 0 003 3h10a3 3 0 003-3v-1" />
+                    </svg>
+                    Import all batches
+                  </button>
+                )}
               </div>
             )}
 
