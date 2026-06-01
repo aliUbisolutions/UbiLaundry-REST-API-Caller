@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useMemo, Fragment } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'react';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
@@ -158,15 +158,21 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 // Reads the header line from the file and returns sep, headers, and the byte
-// offset at which data rows begin (after the header newline).
-async function initCSV(file: File): Promise<{ headers: string[]; sep: string; firstDataOffset: number }> {
+// offset at which data rows begin.
+// If customHeaderNames is provided, the first line is treated as data (offset=0).
+async function initCSV(
+  file: File,
+  customHeaderNames?: string[],
+): Promise<{ headers: string[]; sep: string; firstDataOffset: number }> {
   const head = await readBlobAsText(file.slice(0, Math.min(65536, file.size)));
   const clean = head.startsWith('﻿') ? head.slice(1) : head;
   const nlIdx = clean.indexOf('\n');
-  const headerLine = (nlIdx >= 0 ? clean.slice(0, nlIdx) : clean).replace(/\r$/, '');
-  const sep = detectSep(headerLine);
-  const headers = parseCSVRow(headerLine, sep).map(h => h.trim().replace(/^"|"$/g, ''));
-  // firstDataOffset in bytes (TextEncoder gives exact UTF-8 byte length)
+  const firstLine = (nlIdx >= 0 ? clean.slice(0, nlIdx) : clean).replace(/\r$/, '');
+  const sep = detectSep(firstLine);
+  if (customHeaderNames) {
+    return { headers: customHeaderNames, sep, firstDataOffset: 0 };
+  }
+  const headers = parseCSVRow(firstLine, sep).map(h => h.trim().replace(/^"|"$/g, ''));
   const firstDataOffset = new TextEncoder().encode(clean.slice(0, nlIdx + 1)).length;
   return { headers, sep, firstDataOffset };
 }
@@ -205,14 +211,24 @@ async function loadCSVBatch(
 
 // ─── Excel parser (loads all rows at once — suitable for smaller files) ───────
 
-function parseExcelFile(file: File): Promise<Row[]> {
+function parseExcelFile(file: File, customHeaderNames?: string[]): Promise<Row[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const wb = XLSX.read(e.target?.result as ArrayBuffer, { type: 'array', raw: false, cellDates: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        let raw: Record<string, unknown>[];
+        if (customHeaderNames) {
+          const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
+          raw = arrays.map(row => {
+            const obj: Record<string, unknown> = {};
+            customHeaderNames.forEach((h, i) => { obj[h] = (row as unknown[])[i] ?? ''; });
+            return obj;
+          });
+        } else {
+          raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        }
         resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
       } catch (err) { reject(err); }
     };
@@ -375,13 +391,17 @@ export default function ImportPage() {
   const [sqlSubTableName, setSqlSubTableName]     = useState('item_laundry');
   const [sqlUpsert, setSqlUpsert]                 = useState(true);
 
-  const [autoMode, setAutoMode]     = useState<'import' | 'sql' | null>(null);
+  const [autoMode, setAutoMode]       = useState<'import' | 'sql' | null>(null);
   const [autoBatchNum, setAutoBatchNum] = useState(0);
+
+  const [hasHeader, setHasHeader]         = useState(true);
+  const [customHeaders, setCustomHeaders] = useState('');
 
   const abortRef        = useRef(false);
   const fileRef         = useRef<HTMLInputElement>(null);
   const pendingRef      = useRef<Map<number, Partial<RowResult>>>(new Map());
   const allExcelRowsRef = useRef<Row[]>([]);
+  const currentFileRef  = useRef<File | null>(null);
 
   const targetEnv = useMemo(() =>
     envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
@@ -403,7 +423,8 @@ export default function ImportPage() {
     [rows, reassign, returnValue, activeTables],
   );
 
-  const loadFile = useCallback(async (file: File) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string) => {
+    currentFileRef.current = file;
     setParseError('');
     setRows([]);
     setCsvMeta(null);
@@ -415,10 +436,18 @@ export default function ImportPage() {
     setFileName(file.name);
     setParsing(true);
     allExcelRowsRef.current = [];
+    const customNames = !useHeader
+      ? headerOverride.split(',').map(h => h.trim()).filter(Boolean)
+      : undefined;
+    if (!useHeader && (!customNames || customNames.length === 0)) {
+      setParseError('Enter column names when "First row is header" is off.');
+      setParsing(false);
+      return;
+    }
     try {
       const isCSV = file.name.toLowerCase().endsWith('.csv');
       if (isCSV) {
-        const { headers, sep, firstDataOffset } = await initCSV(file);
+        const { headers, sep, firstDataOffset } = await initCSV(file, customNames);
         const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, headers, sep, firstDataOffset);
         if (batch.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
@@ -429,7 +458,7 @@ export default function ImportPage() {
         setHasMoreBatches(hasMore);
         setRows(batch);
       } else {
-        const allRows = await parseExcelFile(file);
+        const allRows = await parseExcelFile(file, customNames);
         if (allRows.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
           return;
@@ -447,15 +476,31 @@ export default function ImportPage() {
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) loadFile(file);
+    if (file) loadFile(file, hasHeader, customHeaders);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files?.[0];
-    if (file) loadFile(file);
+    if (file) loadFile(file, hasHeader, customHeaders);
   };
+
+  // Re-parse immediately when hasHeader toggles (skip on initial mount)
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; return; }
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders);
+  }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-parse (debounced) when custom header names are edited
+  useEffect(() => {
+    if (hasHeader || !currentFileRef.current) return;
+    const timer = setTimeout(() => {
+      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Core sending logic — used by both single-batch and all-batches import.
   const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]) => {
@@ -615,6 +660,7 @@ export default function ImportPage() {
     setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
     allExcelRowsRef.current = [];
+    currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -791,6 +837,32 @@ export default function ImportPage() {
       </div>
 
       <div className="max-w-5xl mx-auto px-5 py-8 space-y-6">
+
+        {/* Parse options */}
+        <div className="flex flex-wrap items-center gap-4 px-1">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={hasHeader}
+              onChange={e => setHasHeader(e.target.checked)}
+              className="accent-blue-500 w-4 h-4"
+            />
+            <span className="text-sm text-slate-300">First row is header</span>
+          </label>
+          {!hasHeader && (
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <label className="text-xs text-slate-400 shrink-0">Column names</label>
+              <input
+                type="text"
+                value={customHeaders}
+                onChange={e => setCustomHeaders(e.target.value)}
+                placeholder="id, category, encodingDate, lastSeenLocation, …"
+                className="flex-1 bg-slate-800 border border-slate-600 text-white text-xs font-mono rounded px-3 py-1.5 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+              />
+              <span className="text-xs text-slate-500 shrink-0">comma-separated</span>
+            </div>
+          )}
+        </div>
 
         {/* File upload */}
         <div
