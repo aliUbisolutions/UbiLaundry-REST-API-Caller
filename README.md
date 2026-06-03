@@ -185,6 +185,8 @@ The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS 
 
 | Version | Changes |
 |---|---|
+| 1.10.3 | "First row is header" toggle with custom column names for headerless files |
+| 1.10.2 | Auto-import and auto-SQL-export across all batches in one click |
 | 1.10.1 | Chunked CSV reading via `Blob.slice()` — prevents OOM errors on 500k-row files; 50,000-row batches loaded on demand |
 | 1.10.0 | Authentication (login / setup), user management, per-user endpoint access control, version shown on all pages |
 | 1.9.1 | Fix large CSV files returning "No valid rows" (XLSX silent failure on large CSVs) |

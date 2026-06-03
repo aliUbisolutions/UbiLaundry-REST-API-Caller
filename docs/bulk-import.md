@@ -7,11 +7,20 @@ The `/import` page sends one assignment API call per row of a CSV or Excel file.
 - `.csv` (comma-separated, semicolon-separated, or tab-separated — detected automatically)
 - `.xlsx` / `.xls` (Excel)
 
-The first row must be a header row. Each column header is used as a field name.
+By default the first row is treated as a header row and each column header is used as a field name. If your file has no header row, uncheck **First row is header** and type the column names manually (see [Parse options](#parse-options) below).
 
 ### Large CSV files
 
-CSV files are read in streaming batches of 50,000 rows using `Blob.slice()`, so files with hundreds of thousands of rows load without running out of browser memory. Use the **← →** batch navigation buttons to move between batches and import each one in turn.
+CSV files are read in streaming batches of 50,000 rows using `Blob.slice()`, so files with hundreds of thousands of rows load without running out of browser memory. Use the **← →** batch navigation buttons to move between batches, or use the **Import all batches** / **SQL — all batches** buttons to process the entire file automatically.
+
+## Parse options
+
+These options appear above the file drop zone and can be changed at any time — the file is re-parsed automatically when they change.
+
+| Option | Default | Description |
+|---|---|---|
+| **First row is header** | on | Treats the first row as column names. Turn off for files that start directly with data. |
+| **Column names** | *(empty)* | Visible only when **First row is header** is off. Enter the field names in column order, comma-separated (e.g. `id, category, encodingDate`). The `id` field must be included. |
 
 ## Required columns
 
@@ -53,18 +62,28 @@ The final payload sent to the API is:
 }
 ```
 
-The **Reassign** and **Return value** toggles at the top of the page control those two flags for all rows.
+The **Reassign** and **Return value** toggles control those two flags for all rows.
 
 ## Workflow
 
-1. **Upload file** — drag-and-drop or click to browse.
-2. **Import options** — toggle Reassign and Return value flags.
-3. **SQL Export options** — configure table names if you want to download a SQL script instead of calling the API (see below).
-4. **ID Conversion** (optional) — if your file contains IDs from a different environment, select the source environment and the conversion tables to apply.
-5. **Preview payloads** — inspect the exact JSON that will be sent for each row, including any conversion applied. Rows with conversion errors are highlighted in red.
-6. **Download SQL** or **Import N items** — see below.
+1. **Set parse options** — choose whether the first row is a header; enter column names if not.
+2. **Upload file** — drag-and-drop or click to browse.
+3. **Import options** — toggle Reassign and Return value flags.
+4. **SQL Export options** — configure table names if you want to download a SQL script instead of calling the API (see below).
+5. **ID Conversion** (optional) — if your file contains IDs from a different environment, select the source environment and the conversion tables to apply.
+6. **Preview payloads** — inspect the exact JSON that will be sent for each row, including any conversion applied. Rows with conversion errors are highlighted in red.
+7. **Download SQL** or **Import** — see below.
 
 After completion, only error rows are shown. Each error row is expandable to show the request payload and server response. A **Retry N failed** button re-sends only the failed rows without touching successful ones.
+
+## Multi-batch files
+
+When a file has more than 50,000 rows, two extra buttons appear alongside the single-batch actions:
+
+| Button | Description |
+|---|---|
+| **Import all batches** | Sends every batch in sequence without manual navigation. Shows "Importing batch X…" with a **Stop** button. |
+| **SQL — all batches** | Reads every batch and downloads a single combined `.sql` file. Shows "Reading batch X…" during generation. |
 
 ## Conversion tables
 
@@ -104,7 +123,7 @@ Instead of calling the API, you can download a ready-to-run PostgreSQL `.sql` fi
 | `lastSeenWorkstation` | `lastseenworkstationid` |
 | *(hardcoded)* | `hs = false`, `killed = false`, `reformed = false` |
 
-The script is split into 500-row `INSERT` batches. Rows with conversion errors and trailing empty Excel rows are excluded automatically.
+The script is split into 500-row `INSERT` batches. Rows with conversion errors are excluded automatically.
 
 ### Running the script
 
@@ -114,4 +133,4 @@ Open the file in pgAdmin's **Query Tool** (File → Open) and press **F5**.
 
 Requests are sent with 3 parallel workers. The results table only renders error rows to keep the UI fast on large files. A summary line shows the total success count.
 
-For very large files, import one batch at a time using the batch navigation buttons. Each batch is independent — you can retry failed rows within a batch before moving to the next.
+For very large files, use **Import all batches** to process the whole file automatically, or navigate manually with the **← →** buttons and import one batch at a time. Each batch is independent — you can retry failed rows within a batch before moving to the next.
