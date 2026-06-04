@@ -18,12 +18,19 @@ export async function proxy(request: NextRequest) {
 
   const token = request.cookies.get(JWT_COOKIE)?.value;
   if (!token) {
-    // /setup check: if no users exist, redirect to /setup
+    // API routes: return JSON 401 so fetch callers get a clean error (not an HTML redirect
+    // that would delete the cookie mid-operation, e.g. during bulk import).
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ error: 'Session expired — please log in again' }, { status: 401 });
+    }
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
   const payload = await verifyToken(token);
   if (!payload) {
+    if (pathname.startsWith('/api/')) {
+      return NextResponse.json({ error: 'Session expired — please log in again' }, { status: 401 });
+    }
     const res = NextResponse.redirect(new URL('/login', request.url));
     res.cookies.delete(JWT_COOKIE);
     return res;

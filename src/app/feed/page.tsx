@@ -315,6 +315,11 @@ export default function FeedPage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
           });
+          if (res.status === 401 || res.redirected) {
+            abortRef.current = true;
+            update(idx, { status: 'error', message: 'Session expired — please log in again' });
+            continue;
+          }
           const data = await res.json();
           const elapsed = Date.now() - t0;
           if (data.error) {
@@ -401,6 +406,11 @@ export default function FeedPage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
           });
+          if (res.status === 401 || res.redirected) {
+            abortRef.current = true;
+            update(idx, { status: 'error', message: 'Session expired — please log in again' });
+            continue;
+          }
           const data = await res.json();
           const elapsed = Date.now() - t0;
           if (data.error) {

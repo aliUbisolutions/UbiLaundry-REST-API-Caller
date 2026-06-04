@@ -541,6 +541,11 @@ export default function ImportPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
         });
+        if (res.status === 401 || res.redirected) {
+          abortRef.current = true;
+          update(index, { status: 'error', message: 'Session expired — please log in again', payload });
+          return;
+        }
         const data = await res.json();
         const elapsed = Date.now() - t0;
         if (data.error) {
@@ -711,6 +716,11 @@ export default function ImportPage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
           });
+          if (res.status === 401 || res.redirected) {
+            abortRef.current = true;
+            update(idx, { status: 'error', message: 'Session expired — please log in again', payload });
+            continue;
+          }
           const data = await res.json();
           const elapsed = Date.now() - t0;
           if (data.error) {
