@@ -84,6 +84,7 @@ function rowToJsonMapped(
   mappings: Record<string, string>,
   fixedFields: { key: string; value: string }[],
   trimColumns: Set<string>,
+  templateValues: Record<string, unknown>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
@@ -93,6 +94,8 @@ function rowToJsonMapped(
     if (!src) continue;
     if (src === '__null') {
       setPath(result, fieldPath, null);
+    } else if (src === '__template') {
+      setPath(result, fieldPath, templateValues[fieldPath] ?? null);
     } else {
       const raw = row[src] ?? null;
       const val = (trimColumns.has(src) && raw !== null && raw !== undefined)
@@ -105,12 +108,12 @@ function rowToJsonMapped(
 }
 
 
-function extractPaths(obj: unknown, prefix = ''): string[] {
-  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return prefix ? [prefix] : [];
+function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; value: unknown }[] {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return prefix ? [{ path: prefix, value: obj }] : [];
   return Object.entries(obj as Record<string, unknown>).flatMap(([k, v]) => {
     const path = prefix ? `${prefix}.${k}` : k;
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return extractPaths(v, path);
-    return [path];
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return extractPathsWithValues(v, path);
+    return [{ path, value: v }];
   });
 }
 
@@ -217,9 +220,9 @@ export default function FeedPage() {
   const buildRaw = useCallback(
     (row: Record<string, unknown>) =>
       useMappingMode
-        ? rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns)
+        ? rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns, templateValues)
         : rowToJson(row, fixedFields, trimColumns),
-    [useMappingMode, fieldMappings, fixedFields, trimColumns],
+    [useMappingMode, fieldMappings, fixedFields, trimColumns, templateValues],
   );
 
   const previewPayloads = useMemo(() =>
@@ -247,10 +250,18 @@ export default function FeedPage() {
     [selectedId]
   );
 
-  const templatePaths: string[] = useMemo(() => {
+  const templateFields: { path: string; value: unknown }[] = useMemo(() => {
     if (!endpoint?.body) return [];
-    try { return extractPaths(JSON.parse(endpoint.body)); } catch { return []; }
+    try { return extractPathsWithValues(JSON.parse(endpoint.body)); } catch { return []; }
   }, [endpoint]);
+
+  const templatePaths = useMemo(() => templateFields.map(f => f.path), [templateFields]);
+
+  const templateValues = useMemo(() => {
+    const map: Record<string, unknown> = {};
+    for (const { path, value } of templateFields) map[path] = value;
+    return map;
+  }, [templateFields]);
 
   // Group endpoints for the selector
   const grouped = useMemo(() => {
@@ -308,7 +319,8 @@ export default function FeedPage() {
           c.toLowerCase() === path.toLowerCase() ||
           c.toLowerCase() === basename.toLowerCase()
         );
-        init[path] = match ?? '';
+        const hasTemplateVal = templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '';
+        init[path] = match ?? (hasTemplateVal ? '__template' : '');
       }
       setFieldMappings(init);
     } else {
@@ -332,7 +344,8 @@ export default function FeedPage() {
           c.toLowerCase() === path.toLowerCase() ||
           c.toLowerCase() === basename.toLowerCase()
         );
-        next[path] = match ?? '';
+        const hasTemplateVal = templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '';
+        next[path] = match ?? (hasTemplateVal ? '__template' : '');
       }
       return next;
     });
@@ -710,6 +723,9 @@ export default function FeedPage() {
                               >
                                 <option value="">— ignore —</option>
                                 <option value="__null">null</option>
+                                {templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
+                                  <option value="__template">← keep: {String(templateValues[path])}</option>
+                                )}
                                 {columnNames.map((col, i) => (
                                   <option key={col} value={col}>#{i + 1} · {col}</option>
                                 ))}

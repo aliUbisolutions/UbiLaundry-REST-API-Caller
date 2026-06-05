@@ -185,6 +185,7 @@ The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS 
 
 | Version | Changes |
 |---|---|
+| 1.10.7 | Bulk Data Feeder column mapping: new "← keep" option uses the template's original value as-is for every row (e.g. @class fixed to the full class name) |
 | 1.10.6 | Bulk Data Feeder: new Step 3 "Column mapping" — explicitly link each template field to a file column (by name or number), set to null, or ignore it |
 | 1.10.5 | Bulk Data Feeder: click any column pill to toggle space stripping — removes all whitespace from that column's values before sending |
 | 1.10.4 | Fix sign-out during import/feed: middleware returns 401 JSON for API routes instead of redirect + cookie-delete; import/feed pages detect session expiry and stop with a clear message |
