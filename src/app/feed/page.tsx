@@ -119,14 +119,24 @@ function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; valu
 
 // ─── File parsing ─────────────────────────────────────────────────────────────
 
-function parseFile(file: File): Promise<Record<string, unknown>[]> {
+function parseFile(file: File, customHeaderNames?: string[]): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const wb = XLSX.read(e.target?.result, { type: 'binary', raw: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        let raw: Record<string, unknown>[];
+        if (customHeaderNames) {
+          const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
+          raw = arrays.map(row => {
+            const obj: Record<string, unknown> = {};
+            customHeaderNames.forEach((h, i) => { if (h) obj[h] = (row as unknown[])[i] ?? ''; });
+            return obj;
+          });
+        } else {
+          raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        }
         resolve(raw.filter(r => Object.values(r).some(v => v !== '' && v !== null)));
       } catch (err) { reject(err); }
     };
@@ -193,9 +203,13 @@ export default function FeedPage() {
   const [showPreview, setShowPreview] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-  const abortRef   = useRef(false);
-  const fileRef    = useRef<HTMLInputElement>(null);
-  const pendingRef = useRef<Map<number, Partial<RowResult>>>(new Map());
+  const [hasHeader, setHasHeader] = useState(true);
+  const [customHeaders, setCustomHeaders] = useState('');
+  const abortRef       = useRef(false);
+  const fileRef        = useRef<HTMLInputElement>(null);
+  const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
+  const currentFileRef = useRef<File | null>(null);
+  const mountedRef     = useRef(false);
 
   // Conversion state
   const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
@@ -216,6 +230,24 @@ export default function FeedPage() {
     () => rows.length > 0 ? Object.keys(rows[0]).filter(k => k && k !== '__EMPTY') : [],
     [rows],
   );
+
+  const endpoint: Endpoint | undefined = useMemo(
+    () => postEndpoints.find(e => e.id === selectedId),
+    [selectedId]
+  );
+
+  const templateFields: { path: string; value: unknown }[] = useMemo(() => {
+    if (!endpoint?.body) return [];
+    try { return extractPathsWithValues(JSON.parse(endpoint.body)); } catch { return []; }
+  }, [endpoint]);
+
+  const templatePaths = useMemo(() => templateFields.map(f => f.path), [templateFields]);
+
+  const templateValues = useMemo(() => {
+    const map: Record<string, unknown> = {};
+    for (const { path, value } of templateFields) map[path] = value;
+    return map;
+  }, [templateFields]);
 
   const buildRaw = useCallback(
     (row: Record<string, unknown>) =>
@@ -245,24 +277,6 @@ export default function FeedPage() {
     [rows, buildRaw],
   );
 
-  const endpoint: Endpoint | undefined = useMemo(
-    () => postEndpoints.find(e => e.id === selectedId),
-    [selectedId]
-  );
-
-  const templateFields: { path: string; value: unknown }[] = useMemo(() => {
-    if (!endpoint?.body) return [];
-    try { return extractPathsWithValues(JSON.parse(endpoint.body)); } catch { return []; }
-  }, [endpoint]);
-
-  const templatePaths = useMemo(() => templateFields.map(f => f.path), [templateFields]);
-
-  const templateValues = useMemo(() => {
-    const map: Record<string, unknown> = {};
-    for (const { path, value } of templateFields) map[path] = value;
-    return map;
-  }, [templateFields]);
-
   // Group endpoints for the selector
   const grouped = useMemo(() => {
     const map: Record<string, Endpoint[]> = {};
@@ -274,7 +288,8 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string) => {
+    currentFileRef.current = file;
     setParseError('');
     setRows([]);
     setResults([]);
@@ -282,7 +297,10 @@ export default function FeedPage() {
     setFileName(file.name);
     setTrimColumns(new Set());
     try {
-      const parsed = await parseFile(file);
+      const customHeaderNames = !useHeader
+        ? headerOverride.split(',').map(h => h.trim()).filter(Boolean)
+        : undefined;
+      const parsed = await parseFile(file, customHeaderNames);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
       setRows(parsed);
     } catch (err: unknown) {
@@ -291,13 +309,28 @@ export default function FeedPage() {
   }, []);
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) loadFile(f);
+    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, customHeaders);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f);
+    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, customHeaders);
   };
+
+  // Re-parse immediately when hasHeader toggles (skip on initial mount)
+  useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; return; }
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders);
+  }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-parse (debounced) when custom header names are edited
+  useEffect(() => {
+    if (hasHeader || !currentFileRef.current) return;
+    const timer = setTimeout(() => {
+      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
@@ -357,6 +390,7 @@ export default function FeedPage() {
     setTrimColumns(new Set());
     setUseMappingMode(false);
     setFieldMappings({});
+    currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -610,6 +644,31 @@ export default function FeedPage() {
                 <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">2</span>
                 Upload CSV or Excel file
               </h2>
+
+              {/* Parse options */}
+              <div className="flex items-center gap-4 mb-3 flex-wrap">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hasHeader}
+                    onChange={e => setHasHeader(e.target.checked)}
+                    className="accent-blue-500 w-4 h-4"
+                  />
+                  <span className="text-sm text-slate-300">First row is header</span>
+                </label>
+                {!hasHeader && (
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <label className="text-xs text-slate-400 shrink-0">Column names</label>
+                    <input
+                      type="text"
+                      value={customHeaders}
+                      onChange={e => setCustomHeaders(e.target.value)}
+                      placeholder="col1, col2, col3, …"
+                      className="flex-1 bg-slate-800 border border-slate-600 text-white text-xs font-mono rounded px-3 py-1.5 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                    />
+                  </div>
+                )}
+              </div>
 
               <div
                 onDragOver={e => { e.preventDefault(); setDragging(true); }}
