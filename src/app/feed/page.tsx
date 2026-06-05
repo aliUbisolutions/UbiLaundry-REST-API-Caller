@@ -119,7 +119,7 @@ function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; valu
 
 // ─── File parsing ─────────────────────────────────────────────────────────────
 
-function parseFile(file: File, customHeaderNames?: string[]): Promise<Record<string, unknown>[]> {
+function parseFile(file: File, hasHeader: boolean): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -127,11 +127,14 @@ function parseFile(file: File, customHeaderNames?: string[]): Promise<Record<str
         const wb = XLSX.read(e.target?.result, { type: 'binary', raw: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
         let raw: Record<string, unknown>[];
-        if (customHeaderNames) {
+        if (!hasHeader) {
           const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
+          if (arrays.length === 0) { resolve([]); return; }
+          const numCols = Math.max(...arrays.map(row => (row as unknown[]).length));
+          const colNames = Array.from({ length: numCols }, (_, i) => `Column ${i + 1}`);
           raw = arrays.map(row => {
             const obj: Record<string, unknown> = {};
-            customHeaderNames.forEach((h, i) => { if (h) obj[h] = (row as unknown[])[i] ?? ''; });
+            colNames.forEach((h, i) => { obj[h] = (row as unknown[])[i] ?? ''; });
             return obj;
           });
         } else {
@@ -204,7 +207,6 @@ export default function FeedPage() {
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [hasHeader, setHasHeader] = useState(true);
-  const [customHeaders, setCustomHeaders] = useState('');
   const abortRef       = useRef(false);
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -288,7 +290,7 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean) => {
     currentFileRef.current = file;
     setParseError('');
     setRows([]);
@@ -297,10 +299,7 @@ export default function FeedPage() {
     setFileName(file.name);
     setTrimColumns(new Set());
     try {
-      const customHeaderNames = !useHeader
-        ? headerOverride.split(',').map(h => h.trim()).filter(Boolean)
-        : undefined;
-      const parsed = await parseFile(file, customHeaderNames);
+      const parsed = await parseFile(file, useHeader);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
       setRows(parsed);
     } catch (err: unknown) {
@@ -309,28 +308,19 @@ export default function FeedPage() {
   }, []);
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, customHeaders);
+    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, customHeaders);
+    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader);
   };
 
   // Re-parse immediately when hasHeader toggles (skip on initial mount)
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader);
   }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Re-parse (debounced) when custom header names are edited
-  useEffect(() => {
-    if (hasHeader || !currentFileRef.current) return;
-    const timer = setTimeout(() => {
-      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders);
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
@@ -646,7 +636,7 @@ export default function FeedPage() {
               </h2>
 
               {/* Parse options */}
-              <div className="flex items-center gap-4 mb-3 flex-wrap">
+              <div className="flex items-center gap-4 mb-3">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
@@ -657,16 +647,7 @@ export default function FeedPage() {
                   <span className="text-sm text-slate-300">First row is header</span>
                 </label>
                 {!hasHeader && (
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <label className="text-xs text-slate-400 shrink-0">Column names</label>
-                    <input
-                      type="text"
-                      value={customHeaders}
-                      onChange={e => setCustomHeaders(e.target.value)}
-                      placeholder="col1, col2, col3, …"
-                      className="flex-1 bg-slate-800 border border-slate-600 text-white text-xs font-mono rounded px-3 py-1.5 focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
-                    />
-                  </div>
+                  <span className="text-xs text-slate-500">Columns will be named Column 1, Column 2, … — assign them in the mapping step below</span>
                 )}
               </div>
 
