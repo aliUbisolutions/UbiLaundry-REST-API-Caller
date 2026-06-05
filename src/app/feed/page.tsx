@@ -61,7 +61,8 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown) {
 
 function rowToJson(
   row: Record<string, unknown>,
-  fixedFields: { key: string; value: string }[]
+  fixedFields: { key: string; value: string }[],
+  trimColumns?: Set<string>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
@@ -70,7 +71,10 @@ function rowToJson(
   for (const [k, v] of Object.entries(row)) {
     const key = k.trim();
     if (!key || key === '__EMPTY') continue;
-    setPath(result, key, coerce(v));
+    const val = (trimColumns?.has(key) && v !== null && v !== undefined)
+      ? String(v).replace(/\s+/g, '')
+      : v;
+    setPath(result, key, coerce(val));
   }
   return result;
 }
@@ -153,10 +157,10 @@ export default function FeedPage() {
   const [parseError, setParseError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [fixedFields, setFixedFields] = useState<{ key: string; value: string }[]>([]);
+  const [trimColumns, setTrimColumns] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<RowResult[]>([]);
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
-  const [previewRow, setPreviewRow] = useState<string>('');
   const [showPreview, setShowPreview] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
@@ -181,7 +185,7 @@ export default function FeedPage() {
 
   const previewPayloads = useMemo(() =>
     rows.map(row => {
-      const raw = rowToJson(row, fixedFields);
+      const raw = rowToJson(row, fixedFields, trimColumns);
       if (!useConversion || selectedTableIds.length === 0) return { payload: raw, errors: [] as string[], notes: [] as string[] };
       const tables = allTables.filter(t => selectedTableIds.includes(t.id));
       const { converted, errors, notes } = applyConversions(raw, tables);
@@ -191,7 +195,12 @@ export default function FeedPage() {
         notes: notes.map(n => `${n.fieldPath}: ${n.sourceId} ${n.detail}`),
       };
     }),
-    [rows, fixedFields, useConversion, selectedTableIds, allTables]
+    [rows, fixedFields, trimColumns, useConversion, selectedTableIds, allTables]
+  );
+
+  const previewRow = useMemo(
+    () => rows.length > 0 ? JSON.stringify(rowToJson(rows[0], fixedFields, trimColumns), null, 2) : '',
+    [rows, fixedFields, trimColumns],
   );
 
   const endpoint: Endpoint | undefined = useMemo(
@@ -215,29 +224,21 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const updatePreview = useCallback(
-    (r: Record<string, unknown>[], ff: { key: string; value: string }[]) => {
-      if (r.length === 0) { setPreviewRow(''); return; }
-      setPreviewRow(JSON.stringify(rowToJson(r[0], ff), null, 2));
-    },
-    []
-  );
-
   const loadFile = useCallback(async (file: File) => {
     setParseError('');
     setRows([]);
     setResults([]);
     setDone(false);
     setFileName(file.name);
+    setTrimColumns(new Set());
     try {
       const parsed = await parseFile(file);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
       setRows(parsed);
-      updatePreview(parsed, fixedFields);
     } catch (err: unknown) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse file');
     }
-  }, [fixedFields, updatePreview]);
+  }, []);
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (f) loadFile(f);
@@ -248,24 +249,19 @@ export default function FeedPage() {
     const f = e.dataTransfer.files?.[0]; if (f) loadFile(f);
   };
 
-  const updateFixed = (i: number, field: 'key' | 'value', val: string) => {
-    setFixedFields(prev => {
-      const next = prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff);
-      updatePreview(rows, next);
-      return next;
-    });
-  };
+  const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
+    setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
 
   const addFixed = () => setFixedFields(prev => [...prev, { key: '', value: '' }]);
-  const removeFixed = (i: number) => setFixedFields(prev => {
-    const next = prev.filter((_, idx) => idx !== i);
-    updatePreview(rows, next);
-    return next;
-  });
+  const removeFixed = (i: number) => setFixedFields(prev => prev.filter((_, idx) => idx !== i));
+
+  const toggleTrimColumn = (col: string) =>
+    setTrimColumns(prev => { const next = new Set(prev); if (next.has(col)) next.delete(col); else next.add(col); return next; });
 
   const reset = () => {
     setRows([]); setResults([]); setFileName(''); setParseError('');
-    setDone(false); setPreviewRow(''); setShowPreview(false); setExpandedIdx(null);
+    setDone(false); setShowPreview(false); setExpandedIdx(null);
+    setTrimColumns(new Set());
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -556,15 +552,38 @@ export default function FeedPage() {
                 {parseError && <p className="text-red-400 text-sm mt-3">{parseError}</p>}
               </div>
 
-              {/* Column names info */}
+              {/* Column names + strip-spaces toggles */}
               {rows.length > 0 && (
                 <div className="mt-4">
-                  <p className="text-xs text-slate-500 mb-2">Detected columns → JSON paths (use dots for nesting, e.g. <code className="text-slate-400">category.id</code>)</p>
+                  <p className="text-xs text-slate-500 mb-2">
+                    Detected columns → JSON paths (use dots for nesting, e.g. <code className="text-slate-400">category.id</code>).{' '}
+                    <span className="text-amber-500">Click a column to strip spaces from its values.</span>
+                  </p>
                   <div className="flex flex-wrap gap-2">
-                    {Object.keys(rows[0]).filter(k => k && k !== '__EMPTY').map(col => (
-                      <span key={col} className="bg-slate-900 border border-slate-700 text-slate-300 text-xs px-2 py-1 rounded font-mono">{col}</span>
-                    ))}
+                    {Object.keys(rows[0]).filter(k => k && k !== '__EMPTY').map(col => {
+                      const active = trimColumns.has(col);
+                      return (
+                        <button
+                          key={col}
+                          onClick={() => toggleTrimColumn(col)}
+                          title={active ? 'Space stripping ON — click to disable' : 'Click to strip all spaces from this column'}
+                          className={`text-xs px-2 py-1 rounded font-mono transition-colors flex items-center gap-1 ${
+                            active
+                              ? 'bg-amber-900/30 border border-amber-600 text-amber-300'
+                              : 'bg-slate-900 border border-slate-700 text-slate-300 hover:border-slate-500'
+                          }`}
+                        >
+                          {active && <span className="text-amber-400 text-[10px] leading-none">✂</span>}
+                          {col}
+                        </button>
+                      );
+                    })}
                   </div>
+                  {trimColumns.size > 0 && (
+                    <p className="text-xs text-amber-400 mt-2">
+                      Stripping spaces from: {[...trimColumns].join(', ')}
+                    </p>
+                  )}
                 </div>
               )}
             </div>

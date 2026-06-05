@@ -185,6 +185,7 @@ The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS 
 
 | Version | Changes |
 |---|---|
+| 1.10.5 | Bulk Data Feeder: click any column pill to toggle space stripping — removes all whitespace from that column's values before sending |
 | 1.10.4 | Fix sign-out during import/feed: middleware returns 401 JSON for API routes instead of redirect + cookie-delete; import/feed pages detect session expiry and stop with a clear message |
 | 1.10.3 | "First row is header" toggle with custom column names for headerless files |
 | 1.10.2 | Auto-import and auto-SQL-export across all batches in one click |
