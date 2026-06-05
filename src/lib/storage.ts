@@ -30,9 +30,10 @@ export interface ConversionTable {
 
 // ─── Key constants ────────────────────────────────────────────────────────────
 
-export const ACTIVE_CONFIG_KEY = 'ubilaundry-config';
-export const ENVS_KEY          = 'ubilaundry-environments';
-export const TABLES_KEY        = 'ubilaundry-conversion-tables';
+export const ACTIVE_CONFIG_KEY   = 'ubilaundry-config';
+export const ENVS_KEY            = 'ubilaundry-environments';
+export const TABLES_KEY          = 'ubilaundry-conversion-tables';
+export const FEED_TEMPLATES_KEY  = 'ubilaundry-feed-templates';
 
 // ─── ID generator ─────────────────────────────────────────────────────────────
 
@@ -70,6 +71,27 @@ export function loadConversionTables(): ConversionTable[] {
 
 export function saveConversionTables(tables: ConversionTable[]): void {
   localStorage.setItem(TABLES_KEY, JSON.stringify(tables));
+}
+
+// ─── Feed templates ───────────────────────────────────────────────────────────
+
+export interface FeedTemplate {
+  id: string;
+  name: string;
+  endpointId: string;
+  hasHeader: boolean;
+  trimColumns: string[];
+  useMappingMode: boolean;
+  fieldMappings: Record<string, string>;
+  fixedFields: { key: string; value: string }[];
+}
+
+export function loadFeedTemplates(): FeedTemplate[] {
+  try { return JSON.parse(localStorage.getItem(FEED_TEMPLATES_KEY) ?? '[]'); } catch { return []; }
+}
+
+export function saveFeedTemplates(templates: FeedTemplate[]): void {
+  localStorage.setItem(FEED_TEMPLATES_KEY, JSON.stringify(templates));
 }
 
 // ─── Active config ────────────────────────────────────────────────────────────

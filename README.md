@@ -185,6 +185,7 @@ The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS 
 
 | Version | Changes |
 |---|---|
+| 1.10.10 | Bulk Data Feeder: save and load import templates — capture endpoint, header mode, column mapping, trim settings, and fixed fields; stored in localStorage |
 | 1.10.9 | Bulk Data Feeder: fixed fields support `⏱ current datetime` (resolves to ISO string at send time); Excel sheet selector when workbook has multiple tabs |
 | 1.10.8 | Bulk Data Feeder: "First row is header" toggle — when unchecked, columns are auto-named Column 1, Column 2, … and assigned via the mapping step |
 | 1.10.7 | Bulk Data Feeder column mapping: new "← keep" option uses the template's original value as-is for every row (e.g. @class fixed to the full class name) |

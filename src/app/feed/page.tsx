@@ -10,7 +10,8 @@ import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
 import {
   loadEnvironments, loadConversionTables, applyConversions,
-  type Environment, type ConversionTable,
+  loadFeedTemplates, saveFeedTemplates, genId,
+  type Environment, type ConversionTable, type FeedTemplate,
 } from '@/lib/storage';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -226,6 +227,9 @@ export default function FeedPage() {
   const [hasHeader, setHasHeader] = useState(true);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<FeedTemplate[]>(() => { try { return loadFeedTemplates(); } catch { return []; } });
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('');
   const abortRef       = useRef(false);
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -417,6 +421,41 @@ export default function FeedPage() {
     setSheetNames([]); setSelectedSheets([]);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const confirmSaveTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    const tpl: FeedTemplate = {
+      id: genId(),
+      name,
+      endpointId: selectedId,
+      hasHeader,
+      trimColumns: [...trimColumns],
+      useMappingMode,
+      fieldMappings: { ...fieldMappings },
+      fixedFields: fixedFields.map(f => ({ ...f })),
+    };
+    const next = [...templates, tpl];
+    setTemplates(next);
+    saveFeedTemplates(next);
+    setTemplateName('');
+    setSavingTemplate(false);
+  };
+
+  const applyTemplate = (tpl: FeedTemplate) => {
+    setSelectedId(tpl.endpointId);
+    setHasHeader(tpl.hasHeader);
+    setTrimColumns(new Set(tpl.trimColumns));
+    setUseMappingMode(tpl.useMappingMode);
+    setFieldMappings({ ...tpl.fieldMappings });
+    setFixedFields(tpl.fixedFields.map(f => ({ ...f })));
+  };
+
+  const deleteTemplate = (id: string) => {
+    const next = templates.filter(t => t.id !== id);
+    setTemplates(next);
+    saveFeedTemplates(next);
   };
 
   const retryFailed = async () => {
@@ -612,6 +651,57 @@ export default function FeedPage() {
       </div>
 
       <div className="max-w-6xl mx-auto px-5 py-8 space-y-6">
+
+        {/* Templates bar */}
+        {(templates.length > 0 || selectedId) && (
+          <div className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide shrink-0">Templates</span>
+            <div className="flex flex-wrap gap-2 flex-1">
+              {templates.map(tpl => (
+                <div key={tpl.id} className="flex items-center">
+                  <button
+                    onClick={() => applyTemplate(tpl)}
+                    title={`Load template: ${tpl.name}`}
+                    className="text-xs px-2.5 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-l transition-colors"
+                  >
+                    {tpl.name}
+                  </button>
+                  <button
+                    onClick={() => deleteTemplate(tpl.id)}
+                    title="Delete template"
+                    className="text-xs px-1.5 py-1 bg-slate-700 hover:bg-red-900/40 text-slate-500 hover:text-red-400 rounded-r border-l border-slate-600 transition-colors"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            {savingTemplate ? (
+              <div className="flex items-center gap-2">
+                <input
+                  autoFocus
+                  type="text"
+                  value={templateName}
+                  onChange={e => setTemplateName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') confirmSaveTemplate();
+                    if (e.key === 'Escape') { setSavingTemplate(false); setTemplateName(''); }
+                  }}
+                  placeholder="Template name…"
+                  className="text-xs bg-slate-900 border border-slate-600 text-white rounded px-2 py-1 focus:outline-none focus:border-blue-500 w-40"
+                />
+                <button onClick={confirmSaveTemplate} className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors">Save</button>
+                <button onClick={() => { setSavingTemplate(false); setTemplateName(''); }} className="text-xs text-slate-500 hover:text-slate-400 transition-colors">Cancel</button>
+              </div>
+            ) : (
+              selectedId && (
+                <button onClick={() => setSavingTemplate(true)} className="text-xs text-blue-400 hover:text-blue-300 transition-colors shrink-0">
+                  + Save as template
+                </button>
+              )
+            )}
+          </div>
+        )}
 
         {/* Step 1 — Endpoint */}
         <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
