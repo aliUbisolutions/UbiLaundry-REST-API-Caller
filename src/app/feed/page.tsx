@@ -59,6 +59,11 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown) {
   cur[keys[keys.length - 1]] = value;
 }
 
+function resolveFixed(value: string): unknown {
+  if (value.trim() === '__now') return new Date().toISOString();
+  return coerce(value);
+}
+
 function rowToJson(
   row: Record<string, unknown>,
   fixedFields: { key: string; value: string }[],
@@ -66,7 +71,7 @@ function rowToJson(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
-    if (key.trim()) setPath(result, key.trim(), coerce(value));
+    if (key.trim()) setPath(result, key.trim(), resolveFixed(value));
   }
   for (const [k, v] of Object.entries(row)) {
     const key = k.trim();
@@ -88,7 +93,7 @@ function rowToJsonMapped(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
-    if (key.trim()) setPath(result, key.trim(), coerce(value));
+    if (key.trim()) setPath(result, key.trim(), resolveFixed(value));
   }
   for (const [fieldPath, src] of Object.entries(mappings)) {
     if (!src) continue;
@@ -119,28 +124,40 @@ function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; valu
 
 // ─── File parsing ─────────────────────────────────────────────────────────────
 
-function parseFile(file: File, hasHeader: boolean): Promise<Record<string, unknown>[]> {
+function parseSheetRows(ws: XLSX.WorkSheet, hasHeader: boolean): Record<string, unknown>[] {
+  if (!hasHeader) {
+    const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
+    if (arrays.length === 0) return [];
+    const numCols = Math.max(...arrays.map(row => (row as unknown[]).length));
+    const colNames = Array.from({ length: numCols }, (_, i) => `Column ${i + 1}`);
+    return arrays.map(row => {
+      const obj: Record<string, unknown> = {};
+      colNames.forEach((h, i) => { obj[h] = (row as unknown[])[i] ?? ''; });
+      return obj;
+    }).filter(r => Object.values(r).some(v => v !== '' && v !== null));
+  }
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+  return raw.filter(r => Object.values(r).some(v => v !== '' && v !== null));
+}
+
+function parseFile(
+  file: File,
+  hasHeader: boolean,
+  selectedSheets?: string[],
+): Promise<{ rows: Record<string, unknown>[]; sheetNames: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const wb = XLSX.read(e.target?.result, { type: 'binary', raw: false });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        let raw: Record<string, unknown>[];
-        if (!hasHeader) {
-          const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
-          if (arrays.length === 0) { resolve([]); return; }
-          const numCols = Math.max(...arrays.map(row => (row as unknown[]).length));
-          const colNames = Array.from({ length: numCols }, (_, i) => `Column ${i + 1}`);
-          raw = arrays.map(row => {
-            const obj: Record<string, unknown> = {};
-            colNames.forEach((h, i) => { obj[h] = (row as unknown[])[i] ?? ''; });
-            return obj;
-          });
-        } else {
-          raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        const sheetNames = wb.SheetNames;
+        const target = selectedSheets ?? sheetNames;
+        const rows: Record<string, unknown>[] = [];
+        for (const name of target) {
+          const ws = wb.Sheets[name];
+          if (ws) rows.push(...parseSheetRows(ws, hasHeader));
         }
-        resolve(raw.filter(r => Object.values(r).some(v => v !== '' && v !== null)));
+        resolve({ rows, sheetNames });
       } catch (err) { reject(err); }
     };
     reader.onerror = reject;
@@ -207,6 +224,8 @@ export default function FeedPage() {
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [hasHeader, setHasHeader] = useState(true);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
   const abortRef       = useRef(false);
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -290,7 +309,7 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[]) => {
     currentFileRef.current = file;
     setParseError('');
     setRows([]);
@@ -299,13 +318,15 @@ export default function FeedPage() {
     setFileName(file.name);
     setTrimColumns(new Set());
     try {
-      const parsed = await parseFile(file, useHeader);
+      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets);
+      setSheetNames(detected);
+      if (!sheets) setSelectedSheets(detected);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
       setRows(parsed);
     } catch (err: unknown) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse file');
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader);
@@ -316,10 +337,23 @@ export default function FeedPage() {
     const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader);
   };
 
+  const toggleSheet = (name: string) => {
+    const next = selectedSheets.includes(name)
+      ? selectedSheets.filter(s => s !== name)
+      : [...selectedSheets, name];
+    setSelectedSheets(next);
+    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next);
+  };
+
+  const selectAllSheets = () => {
+    setSelectedSheets(sheetNames);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, sheetNames);
+  };
+
   // Re-parse immediately when hasHeader toggles (skip on initial mount)
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length > 0 ? selectedSheets : undefined);
   }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
@@ -380,6 +414,7 @@ export default function FeedPage() {
     setTrimColumns(new Set());
     setUseMappingMode(false);
     setFieldMappings({});
+    setSheetNames([]); setSelectedSheets([]);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
   };
@@ -687,6 +722,36 @@ export default function FeedPage() {
                 {parseError && <p className="text-red-400 text-sm mt-3">{parseError}</p>}
               </div>
 
+              {/* Sheet selector — only for multi-sheet workbooks */}
+              {sheetNames.length > 1 && (
+                <div className="mt-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <p className="text-xs text-slate-400">Sheets to import:</p>
+                    {selectedSheets.length < sheetNames.length && (
+                      <button onClick={selectAllSheets} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">select all</button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {sheetNames.map(name => {
+                      const active = selectedSheets.includes(name);
+                      return (
+                        <button
+                          key={name}
+                          onClick={() => toggleSheet(name)}
+                          className={`text-xs px-2 py-1 rounded font-mono transition-colors ${
+                            active
+                              ? 'bg-blue-900/30 border border-blue-600 text-blue-300'
+                              : 'bg-slate-900 border border-slate-700 text-slate-500 hover:border-slate-500'
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Column names + strip-spaces toggles */}
               {rows.length > 0 && (
                 <div className="mt-4">
@@ -803,13 +868,35 @@ export default function FeedPage() {
                             className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
                           />
                           <span className="text-slate-600 text-xs">=</span>
-                          <input
-                            type="text"
-                            value={ff.value}
-                            onChange={e => updateFixed(i, 'value', e.target.value)}
-                            placeholder="value"
-                            className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
-                          />
+                          {ff.value === '__now' ? (
+                            <div className="flex-1 flex items-center gap-1">
+                              <span className="flex-1 bg-slate-900 border border-violet-700 text-violet-300 text-xs rounded px-2 py-1.5 font-mono">
+                                current datetime
+                              </span>
+                              <button
+                                onClick={() => updateFixed(i, 'value', '')}
+                                className="text-slate-600 hover:text-slate-400 text-xs px-1"
+                                title="Clear"
+                              >×</button>
+                            </div>
+                          ) : (
+                            <>
+                              <input
+                                type="text"
+                                value={ff.value}
+                                onChange={e => updateFixed(i, 'value', e.target.value)}
+                                placeholder="value"
+                                className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                              />
+                              <button
+                                onClick={() => updateFixed(i, 'value', '__now')}
+                                title="Use current datetime"
+                                className="text-slate-500 hover:text-violet-400 transition-colors shrink-0 text-xs px-1"
+                              >
+                                ⏱
+                              </button>
+                            </>
+                          )}
                           <button onClick={() => removeFixed(i)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
