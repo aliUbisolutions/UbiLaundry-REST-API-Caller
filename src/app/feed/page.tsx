@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useMemo, Fragment } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect, Fragment } from 'react';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
@@ -79,7 +79,31 @@ function rowToJson(
   return result;
 }
 
-// ─── Extract suggested column names from a JSON template ─────────────────────
+function rowToJsonMapped(
+  row: Record<string, unknown>,
+  mappings: Record<string, string>,
+  fixedFields: { key: string; value: string }[],
+  trimColumns: Set<string>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const { key, value } of fixedFields) {
+    if (key.trim()) setPath(result, key.trim(), coerce(value));
+  }
+  for (const [fieldPath, src] of Object.entries(mappings)) {
+    if (!src) continue;
+    if (src === '__null') {
+      setPath(result, fieldPath, null);
+    } else {
+      const raw = row[src] ?? null;
+      const val = (trimColumns.has(src) && raw !== null && raw !== undefined)
+        ? String(raw).replace(/\s+/g, '')
+        : raw;
+      setPath(result, fieldPath, coerce(val));
+    }
+  }
+  return result;
+}
+
 
 function extractPaths(obj: unknown, prefix = ''): string[] {
   if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return prefix ? [prefix] : [];
@@ -158,6 +182,8 @@ export default function FeedPage() {
   const [dragging, setDragging] = useState(false);
   const [fixedFields, setFixedFields] = useState<{ key: string; value: string }[]>([]);
   const [trimColumns, setTrimColumns] = useState<Set<string>>(new Set());
+  const [useMappingMode, setUseMappingMode] = useState(false);
+  const [fieldMappings, setFieldMappings] = useState<Record<string, string>>({});
   const [results, setResults] = useState<RowResult[]>([]);
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
@@ -183,9 +209,22 @@ export default function FeedPage() {
   const toggleTable = (id: string) =>
     setSelectedTableIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
 
+  const columnNames = useMemo(
+    () => rows.length > 0 ? Object.keys(rows[0]).filter(k => k && k !== '__EMPTY') : [],
+    [rows],
+  );
+
+  const buildRaw = useCallback(
+    (row: Record<string, unknown>) =>
+      useMappingMode
+        ? rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns)
+        : rowToJson(row, fixedFields, trimColumns),
+    [useMappingMode, fieldMappings, fixedFields, trimColumns],
+  );
+
   const previewPayloads = useMemo(() =>
     rows.map(row => {
-      const raw = rowToJson(row, fixedFields, trimColumns);
+      const raw = buildRaw(row);
       if (!useConversion || selectedTableIds.length === 0) return { payload: raw, errors: [] as string[], notes: [] as string[] };
       const tables = allTables.filter(t => selectedTableIds.includes(t.id));
       const { converted, errors, notes } = applyConversions(raw, tables);
@@ -195,12 +234,12 @@ export default function FeedPage() {
         notes: notes.map(n => `${n.fieldPath}: ${n.sourceId} ${n.detail}`),
       };
     }),
-    [rows, fixedFields, trimColumns, useConversion, selectedTableIds, allTables]
+    [rows, buildRaw, useConversion, selectedTableIds, allTables]
   );
 
   const previewRow = useMemo(
-    () => rows.length > 0 ? JSON.stringify(rowToJson(rows[0], fixedFields, trimColumns), null, 2) : '',
-    [rows, fixedFields, trimColumns],
+    () => rows.length > 0 ? JSON.stringify(buildRaw(rows[0]), null, 2) : '',
+    [rows, buildRaw],
   );
 
   const endpoint: Endpoint | undefined = useMemo(
@@ -258,10 +297,53 @@ export default function FeedPage() {
   const toggleTrimColumn = (col: string) =>
     setTrimColumns(prev => { const next = new Set(prev); if (next.has(col)) next.delete(col); else next.add(col); return next; });
 
+  const handleToggleMappingMode = (enabled: boolean) => {
+    setUseMappingMode(enabled);
+    if (enabled) {
+      const init: Record<string, string> = {};
+      for (const path of templatePaths) {
+        const basename = path.split('.').pop() ?? path;
+        const match = columnNames.find(c =>
+          c === path || c === basename ||
+          c.toLowerCase() === path.toLowerCase() ||
+          c.toLowerCase() === basename.toLowerCase()
+        );
+        init[path] = match ?? '';
+      }
+      setFieldMappings(init);
+    } else {
+      setFieldMappings({});
+    }
+  };
+
+  // When a new file is loaded (columnNames changes) while mapping mode is on,
+  // preserve existing valid mappings and try to re-match the rest.
+  useEffect(() => {
+    if (!useMappingMode || templatePaths.length === 0 || columnNames.length === 0) return;
+    setFieldMappings(prev => {
+      const next: Record<string, string> = {};
+      for (const path of templatePaths) {
+        const prevSrc = prev[path] ?? '';
+        if (prevSrc === '__null') { next[path] = '__null'; continue; }
+        if (prevSrc && columnNames.includes(prevSrc)) { next[path] = prevSrc; continue; }
+        const basename = path.split('.').pop() ?? path;
+        const match = columnNames.find(c =>
+          c === path || c === basename ||
+          c.toLowerCase() === path.toLowerCase() ||
+          c.toLowerCase() === basename.toLowerCase()
+        );
+        next[path] = match ?? '';
+      }
+      return next;
+    });
+  }, [columnNames]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const reset = () => {
     setRows([]); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
     setTrimColumns(new Set());
+    setUseMappingMode(false);
+    setFieldMappings({});
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -588,11 +670,65 @@ export default function FeedPage() {
               )}
             </div>
 
-            {/* Step 3 — Fixed fields + preview */}
-            {rows.length > 0 && (
+            {/* Step 3 — Column mapping */}
+            {rows.length > 0 && templatePaths.length > 0 && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
                 <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
                   <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">3</span>
+                  Column mapping
+                  <span className="text-slate-500 font-normal text-xs ml-1">— link template fields to file columns explicitly</span>
+                </h2>
+
+                <label className="flex items-center gap-2 cursor-pointer mb-4">
+                  <input
+                    type="checkbox"
+                    checked={useMappingMode}
+                    onChange={e => handleToggleMappingMode(e.target.checked)}
+                    className="accent-blue-500 w-4 h-4"
+                  />
+                  <span className="text-sm text-slate-300">Use column mapping</span>
+                </label>
+
+                {useMappingMode && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-700">
+                          <th className="text-left py-2 pr-6 text-slate-400 font-medium">Template field</th>
+                          <th className="text-left py-2 text-slate-400 font-medium">Source column</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {templatePaths.map(path => (
+                          <tr key={path} className="border-b border-slate-700/40">
+                            <td className="py-2 pr-6 font-mono text-slate-300 whitespace-nowrap">{path}</td>
+                            <td className="py-2 w-full">
+                              <select
+                                value={fieldMappings[path] ?? ''}
+                                onChange={e => setFieldMappings(prev => ({ ...prev, [path]: e.target.value }))}
+                                className="w-full bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                              >
+                                <option value="">— ignore —</option>
+                                <option value="__null">null</option>
+                                {columnNames.map((col, i) => (
+                                  <option key={col} value={col}>#{i + 1} · {col}</option>
+                                ))}
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Step 4 — Fixed fields + preview */}
+            {rows.length > 0 && (
+              <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
+                <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">4</span>
                   Fixed fields &amp; JSON preview
                   <span className="text-slate-500 font-normal text-xs ml-1">— optional extra fields added to every row</span>
                 </h2>
@@ -645,11 +781,11 @@ export default function FeedPage() {
               </div>
             )}
 
-            {/* Step 4 — Conversion */}
+            {/* Step 5 — Conversion */}
             {rows.length > 0 && results.length === 0 && allEnvs.length > 1 && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
                 <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">4</span>
+                  <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">5</span>
                   ID conversion
                   <span className="text-slate-500 font-normal text-xs ml-1">— translate IDs from a source environment before sending</span>
                   <Link href="/conversions" className="ml-auto text-xs text-blue-400 hover:text-blue-300 transition-colors">Manage tables →</Link>
