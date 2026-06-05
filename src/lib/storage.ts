@@ -84,6 +84,7 @@ export interface FeedTemplate {
   useMappingMode: boolean;
   fieldMappings: Record<string, string>;
   fixedFields: { key: string; value: string }[];
+  fieldLookups?: Record<string, { entityType: string; envId: string }>;
 }
 
 export function loadFeedTemplates(): FeedTemplate[] {

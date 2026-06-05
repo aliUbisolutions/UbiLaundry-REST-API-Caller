@@ -9,8 +9,8 @@ import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
 import {
-  loadEnvironments, loadConversionTables, applyConversions,
-  loadFeedTemplates, saveFeedTemplates, genId,
+  loadEnvironments, loadConversionTables, applyConversions, proxyGet,
+  loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES,
   type Environment, type ConversionTable, type FeedTemplate,
 } from '@/lib/storage';
 
@@ -60,6 +60,26 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown) {
   cur[keys[keys.length - 1]] = value;
 }
 
+interface LookupEntry { id: unknown; name: string; }
+
+function findBestId(text: string, items: LookupEntry[]): unknown {
+  if (!text || items.length === 0) return null;
+  const needle = text.trim().toLowerCase();
+  // 1. Exact
+  let m = items.find(i => i.name.toLowerCase() === needle);
+  if (m) return m.id;
+  // 2. Starts with
+  m = items.find(i => i.name.toLowerCase().startsWith(needle));
+  if (m) return m.id;
+  // 3. Contains
+  m = items.find(i => i.name.toLowerCase().includes(needle));
+  if (m) return m.id;
+  // 4. All words present
+  const words = needle.split(/\s+/).filter(Boolean);
+  m = items.find(i => words.every(w => i.name.toLowerCase().includes(w)));
+  return m ? m.id : null;
+}
+
 function resolveFixed(value: string): unknown {
   if (value.trim() === '__now') return new Date().toISOString();
   return coerce(value);
@@ -91,6 +111,7 @@ function rowToJsonMapped(
   fixedFields: { key: string; value: string }[],
   trimColumns: Set<string>,
   templateValues: Record<string, unknown>,
+  lookupItems: Record<string, LookupEntry[] | undefined>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
@@ -107,7 +128,13 @@ function rowToJsonMapped(
       const val = (trimColumns.has(src) && raw !== null && raw !== undefined)
         ? String(raw).replace(/\s+/g, '')
         : raw;
-      setPath(result, fieldPath, coerce(val));
+      if (fieldPath in lookupItems) {
+        const items = lookupItems[fieldPath];
+        const text = val !== null && val !== undefined ? String(val) : null;
+        setPath(result, fieldPath, (text && items) ? (findBestId(text, items) ?? null) : null);
+      } else {
+        setPath(result, fieldPath, coerce(val));
+      }
     }
   }
   return result;
@@ -230,6 +257,9 @@ export default function FeedPage() {
   const [templates, setTemplates] = useState<FeedTemplate[]>(() => { try { return loadFeedTemplates(); } catch { return []; } });
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [templateName, setTemplateName] = useState('');
+  const [fieldLookups, setFieldLookups] = useState<Record<string, { entityType: string; envId: string }>>({});
+  const [lookupCache, setLookupCache] = useState<Record<string, LookupEntry[]>>({});
+  const [lookupLoading, setLookupLoading] = useState<Set<string>>(new Set());
   const abortRef       = useRef(false);
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
@@ -275,11 +305,15 @@ export default function FeedPage() {
   }, [templateFields]);
 
   const buildRaw = useCallback(
-    (row: Record<string, unknown>) =>
-      useMappingMode
-        ? rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns, templateValues)
-        : rowToJson(row, fixedFields, trimColumns),
-    [useMappingMode, fieldMappings, fixedFields, trimColumns, templateValues],
+    (row: Record<string, unknown>) => {
+      if (!useMappingMode) return rowToJson(row, fixedFields, trimColumns);
+      const resolvedLookups: Record<string, LookupEntry[] | undefined> = {};
+      for (const [fieldPath, cfg] of Object.entries(fieldLookups)) {
+        resolvedLookups[fieldPath] = lookupCache[`${cfg.envId}:${cfg.entityType}`];
+      }
+      return rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns, templateValues, resolvedLookups);
+    },
+    [useMappingMode, fieldMappings, fixedFields, trimColumns, templateValues, fieldLookups, lookupCache],
   );
 
   const previewPayloads = useMemo(() =>
@@ -369,6 +403,32 @@ export default function FeedPage() {
   const toggleTrimColumn = (col: string) =>
     setTrimColumns(prev => { const next = new Set(prev); if (next.has(col)) next.delete(col); else next.add(col); return next; });
 
+  const loadLookupEntities = useCallback(async (envId: string, entityType: string) => {
+    if (!envId || !entityType) return;
+    const key = `${envId}:${entityType}`;
+    if (lookupCache[key] || lookupLoading.has(key)) return;
+    setLookupLoading(prev => new Set([...prev, key]));
+    try {
+      const env = allEnvs.find(e => e.id === envId);
+      if (!env) return;
+      const raw = await proxyGet(env, `/api/entities/${entityType}`);
+      const data = (raw as Record<string, unknown>[])
+        .map(o => ({ id: o.id, name: String(o.name ?? o.id ?? '') }))
+        .filter(o => o.id !== undefined && o.id !== null && o.id !== '');
+      setLookupCache(prev => ({ ...prev, [key]: data }));
+    } catch { /* silently ignore — preview will show null */ }
+    finally { setLookupLoading(prev => { const next = new Set(prev); next.delete(key); return next; }); }
+  }, [lookupCache, lookupLoading, allEnvs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setFieldLookup = (path: string, cfg: { entityType: string; envId: string } | null) => {
+    setFieldLookups(prev => {
+      const next = { ...prev };
+      if (cfg) { next[path] = cfg; loadLookupEntities(cfg.envId, cfg.entityType); }
+      else delete next[path];
+      return next;
+    });
+  };
+
   const handleToggleMappingMode = (enabled: boolean) => {
     setUseMappingMode(enabled);
     if (enabled) {
@@ -386,6 +446,7 @@ export default function FeedPage() {
       setFieldMappings(init);
     } else {
       setFieldMappings({});
+      setFieldLookups({});
     }
   };
 
@@ -418,6 +479,7 @@ export default function FeedPage() {
     setTrimColumns(new Set());
     setUseMappingMode(false);
     setFieldMappings({});
+    setFieldLookups({});
     setSheetNames([]); setSelectedSheets([]);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
@@ -435,6 +497,7 @@ export default function FeedPage() {
       useMappingMode,
       fieldMappings: { ...fieldMappings },
       fixedFields: fixedFields.map(f => ({ ...f })),
+      fieldLookups: { ...fieldLookups },
     };
     const next = [...templates, tpl];
     setTemplates(next);
@@ -450,6 +513,9 @@ export default function FeedPage() {
     setUseMappingMode(tpl.useMappingMode);
     setFieldMappings({ ...tpl.fieldMappings });
     setFixedFields(tpl.fixedFields.map(f => ({ ...f })));
+    const lookups = tpl.fieldLookups ?? {};
+    setFieldLookups(lookups);
+    for (const cfg of Object.values(lookups)) loadLookupEntities(cfg.envId, cfg.entityType);
   };
 
   const deleteTemplate = (id: string) => {
@@ -907,27 +973,82 @@ export default function FeedPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {templatePaths.map(path => (
-                          <tr key={path} className="border-b border-slate-700/40">
-                            <td className="py-2 pr-6 font-mono text-slate-300 whitespace-nowrap">{path}</td>
-                            <td className="py-2 w-full">
-                              <select
-                                value={fieldMappings[path] ?? ''}
-                                onChange={e => setFieldMappings(prev => ({ ...prev, [path]: e.target.value }))}
-                                className="w-full bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
-                              >
-                                <option value="">— ignore —</option>
-                                <option value="__null">null</option>
-                                {templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
-                                  <option value="__template">← keep: {String(templateValues[path])}</option>
+                        {templatePaths.map(path => {
+                          const src = fieldMappings[path] ?? '';
+                          const isColumn = src && src !== '__null' && src !== '__template';
+                          const lookup = fieldLookups[path] ?? null;
+                          const cacheKey = lookup ? `${lookup.envId}:${lookup.entityType}` : '';
+                          const cacheEntries = cacheKey ? lookupCache[cacheKey] : undefined;
+                          const isLoadingLookup = cacheKey ? lookupLoading.has(cacheKey) : false;
+                          return (
+                            <tr key={path} className="border-b border-slate-700/40">
+                              <td className="py-2 pr-6 font-mono text-slate-300 whitespace-nowrap align-top pt-3">{path}</td>
+                              <td className="py-2 w-full">
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={src}
+                                    onChange={e => {
+                                      setFieldMappings(prev => ({ ...prev, [path]: e.target.value }));
+                                      if (!e.target.value || e.target.value === '__null' || e.target.value === '__template') {
+                                        setFieldLookup(path, null);
+                                      }
+                                    }}
+                                    className="flex-1 bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                                  >
+                                    <option value="">— ignore —</option>
+                                    <option value="__null">null</option>
+                                    {templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
+                                      <option value="__template">← keep: {String(templateValues[path])}</option>
+                                    )}
+                                    {columnNames.map((col, i) => (
+                                      <option key={col} value={col}>#{i + 1} · {col}</option>
+                                    ))}
+                                  </select>
+                                  {isColumn && (
+                                    <label className="flex items-center gap-1 shrink-0 cursor-pointer" title="Match column text to object name and use its ID">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!lookup}
+                                        onChange={e => setFieldLookup(path, e.target.checked
+                                          ? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' }
+                                          : null
+                                        )}
+                                        className="accent-violet-500 w-3.5 h-3.5"
+                                      />
+                                      <span className="text-slate-400 text-[11px]">→ ID</span>
+                                    </label>
+                                  )}
+                                </div>
+                                {lookup && (
+                                  <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                                    <select
+                                      value={lookup.entityType}
+                                      onChange={e => setFieldLookup(path, { ...lookup, entityType: e.target.value })}
+                                      className="bg-slate-900 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                    >
+                                      {ENTITY_TYPES.map(et => <option key={et} value={et}>{et}</option>)}
+                                    </select>
+                                    <span className="text-slate-600 text-[11px]">from</span>
+                                    <select
+                                      value={lookup.envId}
+                                      onChange={e => setFieldLookup(path, { ...lookup, envId: e.target.value })}
+                                      className="bg-slate-900 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                    >
+                                      {allEnvs.length === 0
+                                        ? <option value="">— no environments —</option>
+                                        : allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)
+                                      }
+                                    </select>
+                                    {isLoadingLookup && <span className="text-slate-500 text-[11px]">loading…</span>}
+                                    {cacheEntries && !isLoadingLookup && (
+                                      <span className="text-violet-400 text-[11px]">{cacheEntries.length} entries</span>
+                                    )}
+                                  </div>
                                 )}
-                                {columnNames.map((col, i) => (
-                                  <option key={col} value={col}>#{i + 1} · {col}</option>
-                                ))}
-                              </select>
-                            </td>
-                          </tr>
-                        ))}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
