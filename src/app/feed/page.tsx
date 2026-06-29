@@ -397,14 +397,14 @@ export default function FeedPage() {
 
   const buildRaw = useCallback(
     (row: Record<string, unknown>) => {
-      if (!useMappingMode) return rowToJson(row, fixedFields, trimColumns);
+      if (!useMappingMode && feedProtocol !== 'soap') return rowToJson(row, fixedFields, trimColumns);
       const resolvedLookups: Record<string, LookupEntry[] | undefined> = {};
       for (const [fieldPath, cfg] of Object.entries(fieldLookups)) {
         resolvedLookups[fieldPath] = lookupCache[`${cfg.envId}:${cfg.entityType}`];
       }
       return rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns, templateValues, resolvedLookups);
     },
-    [useMappingMode, fieldMappings, fixedFields, trimColumns, templateValues, fieldLookups, lookupCache],
+    [useMappingMode, feedProtocol, fieldMappings, fixedFields, trimColumns, templateValues, fieldLookups, lookupCache],
   );
 
   const previewPayloads = useMemo(() =>
@@ -1677,7 +1677,10 @@ export default function FeedPage() {
                       </div>
                     )}
                     <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
-                      {JSON.stringify(previewPayloads[previewIdx].payload, null, 2)}
+                      {feedProtocol === 'soap'
+                        ? buildFeedSoapEnvelope(previewPayloads[previewIdx].payload as Record<string, unknown>, soapMacro, soapParamName, soapXsiType, soapReassign)
+                        : JSON.stringify(previewPayloads[previewIdx].payload, null, 2)
+                      }
                     </pre>
                   </>
                 )}
