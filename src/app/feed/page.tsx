@@ -251,9 +251,10 @@ function parseFeedSoapFault(xml: string): string | null {
 
 // ─── SOAP presets ─────────────────────────────────────────────────────────────
 
-const SOAP_PRESETS: Record<string, { macro: string; paramName: string; xsiType: string; fieldPaths: string[] }> = {
+const SOAP_PRESETS: Record<string, { macro: string; path: string; paramName: string; xsiType: string; fieldPaths: string[] }> = {
   Assignment: {
     macro: 'Assignment',
+    path: '/services/UbiManager',
     paramName: 'item',
     xsiType: 'tns:Item',
     fieldPaths: [
@@ -345,7 +346,7 @@ export default function FeedPage() {
 
   // SOAP state
   const [feedProtocol, setFeedProtocol] = useState<'rest' | 'soap'>('rest');
-  const [soapPath, setSoapPath]         = useState('/ws');
+  const [soapPath, setSoapPath]         = useState('/services/UbiManager');
   const [soapMacro, setSoapMacro]       = useState('Assignment');
   const [soapParamName, setSoapParamName] = useState('item');
   const [soapXsiType, setSoapXsiType]   = useState('tns:Item');
@@ -644,7 +645,7 @@ export default function FeedPage() {
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
     const url = feedProtocol === 'soap'
-      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`
+      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/services/UbiManager'}`
       : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
     const headers: Record<string, string> = feedProtocol === 'soap'
       ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
@@ -750,7 +751,7 @@ export default function FeedPage() {
     setResults(initial);
 
     const url = feedProtocol === 'soap'
-      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`
+      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/services/UbiManager'}`
       : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
     const headers: Record<string, string> = feedProtocol === 'soap'
       ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
@@ -1017,6 +1018,7 @@ export default function FeedPage() {
                     key={name}
                     onClick={() => {
                       setSoapMacro(preset.macro);
+                      setSoapPath(preset.path);
                       setSoapParamName(preset.paramName);
                       setSoapXsiType(preset.xsiType);
                       setSoapFieldPaths([...preset.fieldPaths]);
@@ -1029,7 +1031,7 @@ export default function FeedPage() {
                 ))}
               </div>
               <p className="font-mono text-xs text-violet-300 bg-slate-900 rounded px-3 py-2 break-all">
-                POST {config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}{soapPath || '/ws'} → executeMacro({soapMacro || 'Assignment'})
+                POST {config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}{soapPath || '/services/UbiManager'} → executeMacro({soapMacro || 'Assignment'})
               </p>
             </div>
           )}
@@ -1629,7 +1631,7 @@ export default function FeedPage() {
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono truncate max-w-sm">
                   {feedProtocol === 'soap'
-                    ? `POST → ${config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}${soapPath || '/ws'} [SOAP: ${soapMacro || 'Assignment'}]`
+                    ? `POST → ${config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}${soapPath || '/services/UbiManager'} [SOAP: ${soapMacro || 'Assignment'}]`
                     : `POST → ${endpoint!.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}`
                   }
                 </p>
