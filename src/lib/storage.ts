@@ -91,6 +91,7 @@ export interface FeedTemplate {
   soapParamName?: string;
   soapXsiType?: string;
   soapReassign?: boolean;
+  soapFieldPaths?: string[];
 }
 
 export function loadFeedTemplates(): FeedTemplate[] {

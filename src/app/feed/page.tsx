@@ -329,6 +329,7 @@ export default function FeedPage() {
   const [soapParamName, setSoapParamName] = useState('item');
   const [soapXsiType, setSoapXsiType]   = useState('tns:Item');
   const [soapReassign, setSoapReassign] = useState(true);
+  const [soapFieldPaths, setSoapFieldPaths] = useState<string[]>([]);
 
   // Conversion state
   const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
@@ -361,6 +362,11 @@ export default function FeedPage() {
   }, [endpoint]);
 
   const templatePaths = useMemo(() => templateFields.map(f => f.path), [templateFields]);
+
+  const effectivePaths = useMemo(
+    () => feedProtocol === 'soap' ? soapFieldPaths : templatePaths,
+    [feedProtocol, soapFieldPaths, templatePaths],
+  );
 
   const templateValues = useMemo(() => {
     const map: Record<string, unknown> = {};
@@ -497,7 +503,7 @@ export default function FeedPage() {
     setUseMappingMode(enabled);
     if (enabled) {
       const init: Record<string, string> = {};
-      for (const path of templatePaths) {
+      for (const path of effectivePaths) {
         const basename = path.split('.').pop() ?? path;
         const match = columnNames.find(c =>
           c === path || c === basename ||
@@ -517,10 +523,10 @@ export default function FeedPage() {
   // When a new file is loaded (columnNames changes) while mapping mode is on,
   // preserve existing valid mappings and try to re-match the rest.
   useEffect(() => {
-    if (!useMappingMode || templatePaths.length === 0 || columnNames.length === 0) return;
+    if (!useMappingMode || effectivePaths.length === 0 || columnNames.length === 0) return;
     setFieldMappings(prev => {
       const next: Record<string, string> = {};
-      for (const path of templatePaths) {
+      for (const path of effectivePaths) {
         const prevSrc = prev[path] ?? '';
         if (prevSrc === '__null') { next[path] = '__null'; continue; }
         if (prevSrc && columnNames.includes(prevSrc)) { next[path] = prevSrc; continue; }
@@ -547,6 +553,7 @@ export default function FeedPage() {
     setSheetNames([]); setSelectedSheets([]);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
+    // Don't reset soapFieldPaths — user keeps their field list when re-uploading a file
   };
 
   const confirmSaveTemplate = () => {
@@ -564,6 +571,7 @@ export default function FeedPage() {
       fieldLookups: { ...fieldLookups },
       ...(feedProtocol === 'soap' ? {
         soapMode: true, soapPath, soapMacro, soapParamName, soapXsiType, soapReassign,
+        soapFieldPaths: [...soapFieldPaths],
       } : {}),
     };
     const next = [...templates, tpl];
@@ -590,8 +598,10 @@ export default function FeedPage() {
       if (tpl.soapParamName !== undefined) setSoapParamName(tpl.soapParamName);
       if (tpl.soapXsiType !== undefined) setSoapXsiType(tpl.soapXsiType);
       if (tpl.soapReassign !== undefined) setSoapReassign(tpl.soapReassign);
+      if (tpl.soapFieldPaths) setSoapFieldPaths([...tpl.soapFieldPaths]);
     } else {
       setFeedProtocol('rest');
+      setSoapFieldPaths([]);
     }
   };
 
@@ -1138,35 +1148,85 @@ export default function FeedPage() {
             </div>
 
             {/* Step 3 — Column mapping */}
-            {rows.length > 0 && templatePaths.length > 0 && (
+            {rows.length > 0 && (effectivePaths.length > 0 || feedProtocol === 'soap') && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
                 <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
                   <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">3</span>
                   Column mapping
-                  <span className="text-slate-500 font-normal text-xs ml-1">— link template fields to file columns explicitly</span>
+                  <span className="text-slate-500 font-normal text-xs ml-1">— link {feedProtocol === 'soap' ? 'SOAP item fields' : 'template fields'} to file columns</span>
                 </h2>
 
-                <label className="flex items-center gap-2 cursor-pointer mb-4">
-                  <input
-                    type="checkbox"
-                    checked={useMappingMode}
-                    onChange={e => handleToggleMappingMode(e.target.checked)}
-                    className="accent-blue-500 w-4 h-4"
-                  />
-                  <span className="text-sm text-slate-300">Use column mapping</span>
-                </label>
+                {/* SOAP mode: user-defined field paths */}
+                {feedProtocol === 'soap' && (
+                  <div className="mb-4">
+                    <p className="text-xs text-slate-500 mb-2">Define the SOAP item fields to populate from file columns:</p>
+                    <div className="space-y-1.5">
+                      {soapFieldPaths.map((path, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={path}
+                            onChange={e => {
+                              const oldPath = soapFieldPaths[i];
+                              const newPath = e.target.value;
+                              setSoapFieldPaths(prev => { const n = [...prev]; n[i] = newPath; return n; });
+                              if (oldPath && oldPath !== newPath) {
+                                setFieldMappings(prev => {
+                                  const m = { ...prev };
+                                  if (oldPath in m) { m[newPath] = m[oldPath]; delete m[oldPath]; }
+                                  return m;
+                                });
+                              }
+                            }}
+                            placeholder="e.g. id  or  category.id"
+                            className="flex-1 bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 focus:outline-none focus:border-violet-500 placeholder:text-slate-600"
+                          />
+                          <button
+                            onClick={() => {
+                              setSoapFieldPaths(prev => prev.filter((_, idx) => idx !== i));
+                              setFieldMappings(prev => { const m = { ...prev }; delete m[path]; return m; });
+                              setFieldLookup(path, null);
+                            }}
+                            className="text-slate-500 hover:text-red-400 transition-colors px-1"
+                          >×</button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setSoapFieldPaths(prev => [...prev, '']);
+                        if (!useMappingMode) handleToggleMappingMode(true);
+                      }}
+                      className="mt-2 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                    >
+                      + Add field
+                    </button>
+                  </div>
+                )}
 
-                {useMappingMode && (
+                {feedProtocol === 'rest' && (
+                  <label className="flex items-center gap-2 cursor-pointer mb-4">
+                    <input
+                      type="checkbox"
+                      checked={useMappingMode}
+                      onChange={e => handleToggleMappingMode(e.target.checked)}
+                      className="accent-blue-500 w-4 h-4"
+                    />
+                    <span className="text-sm text-slate-300">Use column mapping</span>
+                  </label>
+                )}
+
+                {(useMappingMode || feedProtocol === 'soap') && effectivePaths.length > 0 && (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs border-collapse">
                       <thead>
                         <tr className="border-b border-slate-700">
-                          <th className="text-left py-2 pr-6 text-slate-400 font-medium">Template field</th>
+                          <th className="text-left py-2 pr-6 text-slate-400 font-medium">{feedProtocol === 'soap' ? 'SOAP field' : 'Template field'}</th>
                           <th className="text-left py-2 text-slate-400 font-medium">Source column</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {templatePaths.map(path => {
+                        {effectivePaths.map(path => {
                           const src = fieldMappings[path] ?? '';
                           const isColumn = src && src !== '__null' && src !== '__template';
                           const lookup = fieldLookups[path] ?? null;
@@ -1190,7 +1250,7 @@ export default function FeedPage() {
                                   >
                                     <option value="">— ignore —</option>
                                     <option value="__null">null</option>
-                                    {templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
+                                    {feedProtocol === 'rest' && templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
                                       <option value="__template">← keep: {String(templateValues[path])}</option>
                                     )}
                                     {columnNames.map((col, i) => (
