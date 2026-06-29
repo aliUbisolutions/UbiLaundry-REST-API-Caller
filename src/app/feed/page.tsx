@@ -1004,20 +1004,22 @@ export default function FeedPage() {
                                       <option key={col} value={col}>#{i + 1} · {col}</option>
                                     ))}
                                   </select>
-                                  {isColumn && (
-                                    <label className="flex items-center gap-1 shrink-0 cursor-pointer" title="Match column text to object name and use its ID">
-                                      <input
-                                        type="checkbox"
-                                        checked={!!lookup}
-                                        onChange={e => setFieldLookup(path, e.target.checked
-                                          ? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' }
-                                          : null
-                                        )}
-                                        className="accent-violet-500 w-3.5 h-3.5"
-                                      />
-                                      <span className="text-slate-400 text-[11px]">→ ID</span>
-                                    </label>
-                                  )}
+                                  <label
+                                    className={`flex items-center gap-1 shrink-0 ${isColumn ? 'cursor-pointer' : 'opacity-30 cursor-not-allowed'}`}
+                                    title="Match column text to object name and use its ID"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={!!lookup}
+                                      disabled={!isColumn}
+                                      onChange={e => setFieldLookup(path, e.target.checked
+                                        ? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' }
+                                        : null
+                                      )}
+                                      className="accent-violet-500 w-3.5 h-3.5"
+                                    />
+                                    <span className="text-slate-400 text-[11px]">→ ID</span>
+                                  </label>
                                 </div>
                                 {lookup && (
                                   <div className="mt-1.5 flex items-center gap-2 flex-wrap">
