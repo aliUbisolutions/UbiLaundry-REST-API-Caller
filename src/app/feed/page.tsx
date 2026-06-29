@@ -258,6 +258,7 @@ const SOAP_PRESETS: Record<string, { macro: string; path: string; paramName: str
     paramName: 'item',
     xsiType: 'tns:Item',
     fieldPaths: [
+      'id',
       'encodingDate',
       'firstSeenDate',
       'lastSeenDate',
