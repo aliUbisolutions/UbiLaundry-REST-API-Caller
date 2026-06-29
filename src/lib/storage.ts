@@ -85,6 +85,12 @@ export interface FeedTemplate {
   fieldMappings: Record<string, string>;
   fixedFields: { key: string; value: string }[];
   fieldLookups?: Record<string, { entityType: string; envId: string }>;
+  soapMode?: boolean;
+  soapPath?: string;
+  soapMacro?: string;
+  soapParamName?: string;
+  soapXsiType?: string;
+  soapReassign?: boolean;
 }
 
 export function loadFeedTemplates(): FeedTemplate[] {

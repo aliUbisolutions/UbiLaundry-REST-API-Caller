@@ -193,6 +193,62 @@ function parseFile(
   });
 }
 
+// ─── SOAP helpers ─────────────────────────────────────────────────────────────
+
+function escapeXmlFeed(s: unknown): string {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function jsonToXml(obj: Record<string, unknown>, depth: number): string {
+  const pad = '  '.repeat(depth);
+  return Object.entries(obj)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => {
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        const inner = jsonToXml(v as Record<string, unknown>, depth + 1);
+        return inner ? `${pad}<${k}>\n${inner}\n${pad}</${k}>` : `${pad}<${k}/>`;
+      }
+      return `${pad}<${k}>${escapeXmlFeed(v)}</${k}>`;
+    })
+    .join('\n');
+}
+
+function buildFeedSoapEnvelope(
+  itemJson: Record<string, unknown>,
+  macroName: string,
+  paramName: string,
+  xsiType: string,
+  reassign: boolean,
+): string {
+  const itemXml = jsonToXml(itemJson, 5);
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://ws.ubimanager.ubisolutions.net/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <tns:executeMacro>
+      <macro>${escapeXmlFeed(macroName)}</macro>
+      <params>
+        <params>
+          <name>${escapeXmlFeed(paramName)}</name>
+          <value xsi:type="${escapeXmlFeed(xsiType)}">
+${itemXml}
+          </value>
+        </params>
+        <params>
+          <name>reassign</name>
+          <value xsi:type="xsd:boolean">${reassign}</value>
+        </params>
+      </params>
+    </tns:executeMacro>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+function parseFeedSoapFault(xml: string): string | null {
+  const m = xml.match(/<(?:[\w]+:)?faultstring[^>]*>([\s\S]*?)<\/(?:[\w]+:)?faultstring>/i);
+  if (m) return m[1].trim();
+  return /<(?:[\w]+:)?Fault[\s>]/i.test(xml) ? 'SOAP Fault (no detail)' : null;
+}
+
 // ─── Status icon ─────────────────────────────────────────────────────────────
 
 const STATUS_ICON: Record<RowStatus, ReactElement> = {
@@ -265,6 +321,14 @@ export default function FeedPage() {
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
   const currentFileRef = useRef<File | null>(null);
   const mountedRef     = useRef(false);
+
+  // SOAP state
+  const [feedProtocol, setFeedProtocol] = useState<'rest' | 'soap'>('rest');
+  const [soapPath, setSoapPath]         = useState('/ws');
+  const [soapMacro, setSoapMacro]       = useState('Assignment');
+  const [soapParamName, setSoapParamName] = useState('item');
+  const [soapXsiType, setSoapXsiType]   = useState('tns:Item');
+  const [soapReassign, setSoapReassign] = useState(true);
 
   // Conversion state
   const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
@@ -498,6 +562,9 @@ export default function FeedPage() {
       fieldMappings: { ...fieldMappings },
       fixedFields: fixedFields.map(f => ({ ...f })),
       fieldLookups: { ...fieldLookups },
+      ...(feedProtocol === 'soap' ? {
+        soapMode: true, soapPath, soapMacro, soapParamName, soapXsiType, soapReassign,
+      } : {}),
     };
     const next = [...templates, tpl];
     setTemplates(next);
@@ -516,6 +583,16 @@ export default function FeedPage() {
     const lookups = tpl.fieldLookups ?? {};
     setFieldLookups(lookups);
     for (const cfg of Object.values(lookups)) loadLookupEntities(cfg.envId, cfg.entityType);
+    if (tpl.soapMode) {
+      setFeedProtocol('soap');
+      if (tpl.soapPath !== undefined) setSoapPath(tpl.soapPath);
+      if (tpl.soapMacro !== undefined) setSoapMacro(tpl.soapMacro);
+      if (tpl.soapParamName !== undefined) setSoapParamName(tpl.soapParamName);
+      if (tpl.soapXsiType !== undefined) setSoapXsiType(tpl.soapXsiType);
+      if (tpl.soapReassign !== undefined) setSoapReassign(tpl.soapReassign);
+    } else {
+      setFeedProtocol('rest');
+    }
   };
 
   const deleteTemplate = (id: string) => {
@@ -526,7 +603,7 @@ export default function FeedPage() {
 
   const retryFailed = async () => {
     const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
-    if (failedIndices.length === 0 || !endpoint) return;
+    if (failedIndices.length === 0 || (feedProtocol === 'rest' && !endpoint)) return;
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
 
     abortRef.current = false;
@@ -535,8 +612,12 @@ export default function FeedPage() {
     setExpandedIdx(null);
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
-    const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    const url = feedProtocol === 'soap'
+      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`
+      : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
+    const headers: Record<string, string> = feedProtocol === 'soap'
+      ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
+      : { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
@@ -565,10 +646,16 @@ export default function FeedPage() {
           if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join(' | '), payload: finalJson }); continue; }
           const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
           const t0 = Date.now();
+          const bodyStr = feedProtocol === 'soap'
+            ? buildFeedSoapEnvelope(finalJson, soapMacro, soapParamName, soapXsiType, soapReassign)
+            : JSON.stringify(finalJson);
+          const proxyReq = feedProtocol === 'soap'
+            ? { url, method: 'POST', headers, body: bodyStr }
+            : { url, method: 'POST', headers, body: bodyStr, endpointId: selectedId };
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
+            body: JSON.stringify(proxyReq),
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -580,14 +667,26 @@ export default function FeedPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
-            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            if (feedProtocol === 'soap') {
+              const fault = parseFeedSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload: finalJson, responseBody: data.body, elapsed });
+              } else {
+                const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+                update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+              }
+            } else {
+              const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+              update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
+            const msg = feedProtocol === 'soap'
+              ? (parseFeedSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload: finalJson, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
@@ -604,7 +703,7 @@ export default function FeedPage() {
 
   const runFeed = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
-    if (!endpoint || rows.length === 0) return;
+    if ((feedProtocol === 'rest' && !endpoint) || rows.length === 0) return;
 
     setShowPreview(false);
     abortRef.current = false;
@@ -619,8 +718,12 @@ export default function FeedPage() {
     }));
     setResults(initial);
 
-    const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    const url = feedProtocol === 'soap'
+      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`
+      : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
+    const headers: Record<string, string> = feedProtocol === 'soap'
+      ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
+      : { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
@@ -656,10 +759,16 @@ export default function FeedPage() {
           const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
 
           const t0 = Date.now();
+          const bodyStr = feedProtocol === 'soap'
+            ? buildFeedSoapEnvelope(finalJson, soapMacro, soapParamName, soapXsiType, soapReassign)
+            : JSON.stringify(finalJson);
+          const proxyReq = feedProtocol === 'soap'
+            ? { url, method: 'POST', headers, body: bodyStr }
+            : { url, method: 'POST', headers, body: bodyStr, endpointId: selectedId };
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
+            body: JSON.stringify(proxyReq),
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -671,14 +780,26 @@ export default function FeedPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
-            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            if (feedProtocol === 'soap') {
+              const fault = parseFeedSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload: finalJson, responseBody: data.body, elapsed });
+              } else {
+                const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+                update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+              }
+            } else {
+              const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+              update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
+            const msg = feedProtocol === 'soap'
+              ? (parseFeedSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload: finalJson, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
@@ -760,7 +881,7 @@ export default function FeedPage() {
                 <button onClick={() => { setSavingTemplate(false); setTemplateName(''); }} className="text-xs text-slate-500 hover:text-slate-400 transition-colors">Cancel</button>
               </div>
             ) : (
-              selectedId && (
+              (selectedId || feedProtocol === 'soap') && (
                 <button onClick={() => setSavingTemplate(true)} className="text-xs text-blue-400 hover:text-blue-300 transition-colors shrink-0">
                   + Save as template
                 </button>
@@ -775,24 +896,96 @@ export default function FeedPage() {
             <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">1</span>
             Select target endpoint
           </h2>
-          <select
-            value={selectedId}
-            onChange={e => { setSelectedId(e.target.value); reset(); }}
-            className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500"
-          >
-            <option value="">— choose a POST endpoint —</option>
-            {Object.entries(grouped).map(([group, eps]) => (
-              <optgroup key={group} label={group}>
-                {eps.map(ep => (
-                  <option key={ep.id} value={ep.id}>
-                    {ep.name} — {ep.url.replace('{{baseURL}}', '')}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
 
-          {endpoint && (
+          {/* Protocol toggle */}
+          <div className="flex items-center gap-4 mb-3 flex-wrap">
+            <span className="text-xs text-slate-400">Protocol</span>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name="feed-protocol" value="rest" checked={feedProtocol === 'rest'} onChange={() => setFeedProtocol('rest')} className="accent-blue-500" />
+              <span className="text-sm text-slate-300">REST</span>
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name="feed-protocol" value="soap" checked={feedProtocol === 'soap'} onChange={() => { setFeedProtocol('soap'); setSelectedId(''); }} className="accent-blue-500" />
+              <span className="text-sm text-slate-300">SOAP</span>
+            </label>
+          </div>
+
+          {feedProtocol === 'rest' && (
+            <select
+              value={selectedId}
+              onChange={e => { setSelectedId(e.target.value); reset(); }}
+              className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500"
+            >
+              <option value="">— choose a POST endpoint —</option>
+              {Object.entries(grouped).map(([group, eps]) => (
+                <optgroup key={group} label={group}>
+                  {eps.map(ep => (
+                    <option key={ep.id} value={ep.id}>
+                      {ep.name} — {ep.url.replace('{{baseURL}}', '')}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
+
+          {feedProtocol === 'soap' && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Path</label>
+                  <input
+                    type="text"
+                    value={soapPath}
+                    onChange={e => setSoapPath(e.target.value)}
+                    placeholder="/ws"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-28 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Macro</label>
+                  <input
+                    type="text"
+                    value={soapMacro}
+                    onChange={e => setSoapMacro(e.target.value)}
+                    placeholder="Assignment"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-36 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={soapReassign} onChange={e => setSoapReassign(e.target.checked)} className="accent-violet-500 w-4 h-4" />
+                  <span className="text-sm text-slate-300">Reassign</span>
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500 shrink-0">Param name</label>
+                  <input
+                    type="text"
+                    value={soapParamName}
+                    onChange={e => setSoapParamName(e.target.value)}
+                    placeholder="item"
+                    className="bg-slate-900 border border-slate-600 text-slate-400 text-xs font-mono rounded px-2 py-1.5 w-24 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500 shrink-0">XSI type</label>
+                  <input
+                    type="text"
+                    value={soapXsiType}
+                    onChange={e => setSoapXsiType(e.target.value)}
+                    placeholder="tns:Item"
+                    className="bg-slate-900 border border-slate-600 text-slate-400 text-xs font-mono rounded px-2 py-1.5 w-28 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+              </div>
+              <p className="font-mono text-xs text-violet-300 bg-slate-900 rounded px-3 py-2 break-all">
+                POST {config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}{soapPath || '/ws'} → executeMacro({soapMacro || 'Assignment'})
+              </p>
+            </div>
+          )}
+
+          {endpoint && feedProtocol === 'rest' && (
             <div className="mt-4 grid grid-cols-2 gap-4">
               {/* URL */}
               <div>
@@ -817,7 +1010,7 @@ export default function FeedPage() {
           )}
         </div>
 
-        {endpoint && (
+        {(endpoint || feedProtocol === 'soap') && (
           <>
             {/* Step 2 — File */}
             <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
@@ -1212,7 +1405,7 @@ export default function FeedPage() {
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
-                  Send {rows.length} rows to API
+                  {feedProtocol === 'soap' ? `Send ${rows.length} rows via SOAP` : `Send ${rows.length} rows to API`}
                 </button>
               </div>
             )}
@@ -1328,7 +1521,7 @@ export default function FeedPage() {
       </div>
 
       {/* Payload preview panel */}
-      {showPreview && endpoint && (
+      {showPreview && (endpoint || feedProtocol === 'soap') && (
         <div className="fixed inset-0 bg-black/70 z-50 flex">
           <div className="flex-1" onClick={() => setShowPreview(false)} />
           <div className="w-full max-w-3xl bg-slate-900 border-l border-slate-700 flex flex-col shadow-2xl">
@@ -1336,7 +1529,10 @@ export default function FeedPage() {
               <div>
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono truncate max-w-sm">
-                  POST → {endpoint.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}
+                  {feedProtocol === 'soap'
+                    ? `POST → ${config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}${soapPath || '/ws'} [SOAP: ${soapMacro || 'Assignment'}]`
+                    : `POST → ${endpoint!.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}`
+                  }
                 </p>
               </div>
               <div className="flex items-center gap-2">
