@@ -99,6 +99,67 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
   return { item, reassign, returnValue };
 }
 
+// ─── SOAP helpers ─────────────────────────────────────────────────────────────
+
+function escapeXml(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildItemXml(item: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [key, val] of Object.entries(item)) {
+    if (key === '@class' || key === 'attributeLinks' || val === null || val === undefined) continue;
+    if (typeof val === 'object' && !Array.isArray(val)) {
+      const nested = val as Record<string, unknown>;
+      if (nested.id !== undefined) {
+        lines.push(`          <${key}><id>${escapeXml(nested.id)}</id></${key}>`);
+      }
+    } else if (key === 'id') {
+      lines.push(`          <id xsi:type="xsd:string">${escapeXml(val)}</id>`);
+    } else if (typeof val === 'boolean') {
+      lines.push(`          <${key}>${val}</${key}>`);
+    } else {
+      lines.push(`          <${key}>${escapeXml(val)}</${key}>`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildSoapEnvelope(item: Record<string, unknown>, reassign: boolean): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://ws.ubimanager.ubisolutions.net/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <tns:executeMacro>
+      <macro>Assignment</macro>
+      <params>
+        <params>
+          <name>item</name>
+          <value xsi:type="tns:Item">
+${buildItemXml(item)}
+          </value>
+        </params>
+        <params>
+          <name>reassign</name>
+          <value xsi:type="xsd:boolean">${reassign}</value>
+        </params>
+      </params>
+    </tns:executeMacro>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+function parseSoapFault(xml: string): string | null {
+  const m = xml.match(/<(?:[\w]+:)?faultstring[^>]*>([\s\S]*?)<\/(?:[\w]+:)?faultstring>/i);
+  if (m) return m[1].trim();
+  return /<(?:[\w]+:)?Fault[\s>]/i.test(xml) ? 'SOAP Fault (no detail)' : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const BATCH_SIZE = 50_000;
 const CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB per read
 
@@ -379,6 +440,8 @@ export default function ImportPage() {
   const [reassign, setReassign]         = useState(true);
   const [returnValue, setReturnValue]   = useState(true);
   const [concurrency]                   = useState(3);
+  const [protocol, setProtocol]         = useState<'rest' | 'soap'>('rest');
+  const [soapPath, setSoapPath]         = useState('/ws');
 
   const [sourceEnvId, setSourceEnvId]             = useState('');
   const [selectedTableIds, setSelectedTableIds]   = useState<Set<string>>(new Set());
@@ -536,10 +599,21 @@ export default function ImportPage() {
       if (convErrors.length > 0) { update(index, { status: 'error', message: convErrors.join('; '), payload }); return; }
       try {
         const t0 = Date.now();
+        let proxyBody: string;
+        if (protocol === 'soap') {
+          const item = (payload.item ?? {}) as Record<string, unknown>;
+          const soapXml = buildSoapEnvelope(item, reassign);
+          const soapUrl = `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`;
+          const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
+          if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+          proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
+        } else {
+          proxyBody = JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) });
+        }
         const res = await fetch('/api/proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
+          body: proxyBody,
         });
         if (res.status === 401 || res.redirected) {
           abortRef.current = true;
@@ -551,13 +625,24 @@ export default function ImportPage() {
         if (data.error) {
           update(index, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
         } else if (data.status >= 200 && data.status < 300) {
-          update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+          if (protocol === 'soap') {
+            const fault = parseSoapFault(String(data.body ?? ''));
+            if (fault) {
+              update(index, { status: 'error', httpStatus: data.status, message: fault, payload, responseBody: data.body, elapsed });
+            } else {
+              update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            }
+          } else {
+            update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+          }
         } else {
           const body = data.body;
-          const msg = body && typeof body === 'object'
-            ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-            : String(body ?? '');
-          update(index, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
+          const msg = protocol === 'soap'
+            ? (parseSoapFault(String(body ?? '')) ?? String(body ?? ''))
+            : body && typeof body === 'object'
+              ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+              : String(body ?? '');
+          update(index, { status: 'error', httpStatus: data.status, message: msg, payload, responseBody: body, elapsed });
         }
       } catch (err: unknown) {
         update(index, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
@@ -711,10 +796,21 @@ export default function ImportPage() {
         if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join('; '), payload }); continue; }
         try {
           const t0 = Date.now();
+          let proxyBody: string;
+          if (protocol === 'soap') {
+            const item = (payload.item ?? {}) as Record<string, unknown>;
+            const soapXml = buildSoapEnvelope(item, reassign);
+            const soapUrl = `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`;
+            const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
+            if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+            proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
+          } else {
+            proxyBody = JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) });
+          }
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
+            body: proxyBody,
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -726,13 +822,24 @@ export default function ImportPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            if (protocol === 'soap') {
+              const fault = parseSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload, responseBody: data.body, elapsed });
+              } else {
+                update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+              }
+            } else {
+              update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
+            const msg = protocol === 'soap'
+              ? (parseSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
@@ -958,17 +1065,44 @@ export default function ImportPage() {
             {/* Import options */}
             <div className="bg-slate-800 border border-slate-700 rounded-lg px-5 py-4">
               <h2 className="text-sm font-semibold text-slate-300 mb-3">Import Options</h2>
+              <div className="flex flex-wrap gap-6 mb-3">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <span className="text-xs text-slate-400">Protocol</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="import-protocol" value="rest" checked={protocol === 'rest'} onChange={() => setProtocol('rest')} className="accent-blue-500" />
+                    <span className="text-sm text-slate-300">REST</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="import-protocol" value="soap" checked={protocol === 'soap'} onChange={() => setProtocol('soap')} className="accent-blue-500" />
+                    <span className="text-sm text-slate-300">SOAP</span>
+                  </label>
+                  {protocol === 'soap' && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400">Path</span>
+                      <input
+                        type="text"
+                        value={soapPath}
+                        onChange={e => setSoapPath(e.target.value)}
+                        placeholder="/ws"
+                        className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1 w-28 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
               <div className="flex flex-wrap gap-6">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={reassign} onChange={e => setReassign(e.target.checked)} className="accent-blue-500 w-4 h-4" />
                   <span className="text-sm text-slate-300">Reassign</span>
                   <span className="text-xs text-slate-500">(reassign if already assigned)</span>
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={returnValue} onChange={e => setReturnValue(e.target.checked)} className="accent-blue-500 w-4 h-4" />
-                  <span className="text-sm text-slate-300">Return value</span>
-                  <span className="text-xs text-slate-500">(include item in response)</span>
-                </label>
+                {protocol === 'rest' && (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={returnValue} onChange={e => setReturnValue(e.target.checked)} className="accent-blue-500 w-4 h-4" />
+                    <span className="text-sm text-slate-300">Return value</span>
+                    <span className="text-xs text-slate-500">(include item in response)</span>
+                  </label>
+                )}
               </div>
             </div>
 
