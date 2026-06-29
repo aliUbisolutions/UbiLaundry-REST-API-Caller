@@ -47,9 +47,17 @@ if [ -n "$OLD_IMAGE" ]; then
   fi
 fi
 
-# ── 6. Prune dangling build layers left by the new build ─────────────────────
-log "Pruning dangling images..."
-docker image prune -f
+# ── 6. Prune dangling layers for THIS project only ────────────────────────────
+# Docker Compose labels every image it builds with the project name.
+# We filter by that label so other projects are never touched.
+COMPOSE_PROJECT=$(docker compose -f "$REPO_DIR/docker-compose.yml" ls --format json 2>/dev/null \
+  | grep -o '"Name":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+if [ -z "$COMPOSE_PROJECT" ]; then
+  # Fallback: derive from directory name the same way Compose does
+  COMPOSE_PROJECT=$(basename "$REPO_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+fi
+log "Pruning dangling images for project '$COMPOSE_PROJECT'..."
+docker image prune -f --filter "label=com.docker.compose.project=$COMPOSE_PROJECT"
 
 # ── 7. Status ─────────────────────────────────────────────────────────────────
 log "=== Deploy complete ==="
