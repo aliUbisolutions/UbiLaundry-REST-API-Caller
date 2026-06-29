@@ -249,6 +249,27 @@ function parseFeedSoapFault(xml: string): string | null {
   return /<(?:[\w]+:)?Fault[\s>]/i.test(xml) ? 'SOAP Fault (no detail)' : null;
 }
 
+// ─── SOAP presets ─────────────────────────────────────────────────────────────
+
+const SOAP_PRESETS: Record<string, { macro: string; paramName: string; xsiType: string; fieldPaths: string[] }> = {
+  Assignment: {
+    macro: 'Assignment',
+    paramName: 'item',
+    xsiType: 'tns:Item',
+    fieldPaths: [
+      'encodingDate',
+      'firstSeenDate',
+      'lastSeenDate',
+      'category.id',
+      'lastSeenLocation.id',
+      'lastSeenWorkstation.id',
+      'lastMovementType.id',
+      'lastReportLocation.id',
+      'comment',
+    ],
+  },
+};
+
 // ─── Status icon ─────────────────────────────────────────────────────────────
 
 const STATUS_ICON: Record<RowStatus, ReactElement> = {
@@ -988,6 +1009,24 @@ export default function FeedPage() {
                     className="bg-slate-900 border border-slate-600 text-slate-400 text-xs font-mono rounded px-2 py-1.5 w-28 focus:outline-none focus:border-violet-500"
                   />
                 </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-slate-500">Presets:</span>
+                {Object.entries(SOAP_PRESETS).map(([name, preset]) => (
+                  <button
+                    key={name}
+                    onClick={() => {
+                      setSoapMacro(preset.macro);
+                      setSoapParamName(preset.paramName);
+                      setSoapXsiType(preset.xsiType);
+                      setSoapFieldPaths([...preset.fieldPaths]);
+                      if (!useMappingMode) handleToggleMappingMode(true);
+                    }}
+                    className="text-xs px-2.5 py-1 rounded border border-violet-700 text-violet-300 hover:bg-violet-900/40 transition-colors"
+                  >
+                    {name}
+                  </button>
+                ))}
               </div>
               <p className="font-mono text-xs text-violet-300 bg-slate-900 rounded px-3 py-2 break-all">
                 POST {config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}{soapPath || '/ws'} → executeMacro({soapMacro || 'Assignment'})
