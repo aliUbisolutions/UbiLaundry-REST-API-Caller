@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
-  loadEnvironments, saveEnvironments, saveActiveConfig,
+  loadEnvironments, saveEnvironments, saveActiveConfig, normalizeBaseUrl,
   genId, type Environment, type ActiveConfig,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
@@ -54,7 +54,7 @@ export default function ConfigBar({ config, onChange }: Props) {
   const test = async () => {
     if (!local.baseUrl) { setTestStatus('error'); setTestMessage('Base URL is required.'); return; }
     setTestStatus('testing'); setTestMessage('');
-    const url = `${local.baseUrl.replace(/\/$/, '')}/api/getServerTime`;
+    const url = `${normalizeBaseUrl(local.baseUrl)}/api/getServerTime`;
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (local.username) headers['Authorization'] = 'Basic ' + btoa(`${local.username}:${local.password}`);
     try {
@@ -63,7 +63,7 @@ export default function ConfigBar({ config, onChange }: Props) {
       if (data.error) { setTestStatus('error'); setTestMessage(data.error); }
       else if (data.status >= 200 && data.status < 300) { setTestStatus('ok'); setTestMessage(`Connected — ${data.status} in ${data.elapsed}ms`); }
       else if (data.status === 401 || data.status === 403) { setTestStatus('error'); setTestMessage(`Authentication failed (${data.status})`); }
-      else { setTestStatus('error'); setTestMessage(`Server returned ${data.status} ${data.statusText}`); }
+      else if (data.status === 500) { setTestStatus('error'); setTestMessage(`Server returned 500 — credentials may be incorrect or the server rejected the request`); }
     } catch (err: unknown) { setTestStatus('error'); setTestMessage(err instanceof Error ? err.message : 'Unexpected error'); }
   };
 

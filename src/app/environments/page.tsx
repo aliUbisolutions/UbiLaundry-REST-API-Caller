@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import {
-  loadEnvironments, saveEnvironments, saveActiveConfig,
+  loadEnvironments, saveEnvironments, saveActiveConfig, normalizeBaseUrl,
   loadConversionTables, saveConversionTables,
   genId, type Environment, type ConversionTable,
 } from '@/lib/storage';
@@ -101,7 +101,7 @@ export default function EnvironmentsPage() {
 
   const testEnv = async (env: Environment | ServerEnvironment) => {
     setTesting(env.id);
-    const url = `${env.baseUrl.replace(/\/$/, '')}/api/getServerTime`;
+    const url = `${normalizeBaseUrl(env.baseUrl)}/api/getServerTime`;
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (env.username) headers['Authorization'] = 'Basic ' + btoa(`${env.username}:${env.password}`);
     try {
