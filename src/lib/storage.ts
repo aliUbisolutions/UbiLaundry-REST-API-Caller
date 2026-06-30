@@ -130,10 +130,19 @@ export const ENTITY_TYPES = [
 
 export type EntityType = typeof ENTITY_TYPES[number];
 
+// ─── URL helpers ──────────────────────────────────────────────────────────────
+
+export function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
 // ─── Proxy helper ─────────────────────────────────────────────────────────────
 
 export async function proxyGet(env: Environment, path: string): Promise<unknown[]> {
-  const url = `${env.baseUrl.replace(/\/$/, '')}${path}`;
+  const url = `${normalizeBaseUrl(env.baseUrl)}${path}`;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (env.username) headers['Authorization'] = 'Basic ' + btoa(`${env.username}:${env.password}`);
 

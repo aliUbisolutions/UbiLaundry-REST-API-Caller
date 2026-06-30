@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
 import {
-  loadEnvironments, loadConversionTables, applyConversions,
+  loadEnvironments, loadConversionTables, applyConversions, normalizeBaseUrl,
   type Environment, type ConversionTable, type ConversionNote,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
@@ -441,7 +441,7 @@ export default function ImportPage() {
   const [returnValue, setReturnValue]   = useState(true);
   const [concurrency]                   = useState(3);
   const [protocol, setProtocol]         = useState<'rest' | 'soap'>('rest');
-  const [soapPath, setSoapPath]         = useState('/ws');
+  const [soapPath, setSoapPath]         = useState('/services/UbiManager');
 
   const [sourceEnvId, setSourceEnvId]             = useState('');
   const [selectedTableIds, setSelectedTableIds]   = useState<Set<string>>(new Set());
@@ -467,7 +467,7 @@ export default function ImportPage() {
   const currentFileRef  = useRef<File | null>(null);
 
   const targetEnv = useMemo(() =>
-    envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
+    envs.find(e => normalizeBaseUrl(e.baseUrl) === normalizeBaseUrl(config.baseUrl ?? '')),
     [envs, config.baseUrl]
   );
 
@@ -572,7 +572,7 @@ export default function ImportPage() {
     setExpandedIdx(null);
     setResults(targetRows.map(row => ({ row, status: 'pending' as RowStatus })));
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
+    const url = `${normalizeBaseUrl(config.baseUrl)}/api/assignment`;
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
@@ -603,7 +603,7 @@ export default function ImportPage() {
         if (protocol === 'soap') {
           const item = (payload.item ?? {}) as Record<string, unknown>;
           const soapXml = buildSoapEnvelope(item, reassign);
-          const soapUrl = `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`;
+          const soapUrl = `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`;
           const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
           if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
           proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
@@ -765,7 +765,7 @@ export default function ImportPage() {
     setExpandedIdx(null);
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
+    const url = `${normalizeBaseUrl(config.baseUrl)}/api/assignment`;
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
@@ -800,7 +800,7 @@ export default function ImportPage() {
           if (protocol === 'soap') {
             const item = (payload.item ?? {}) as Record<string, unknown>;
             const soapXml = buildSoapEnvelope(item, reassign);
-            const soapUrl = `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/ws'}`;
+            const soapUrl = `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`;
             const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
             if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
             proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
@@ -1386,7 +1386,7 @@ export default function ImportPage() {
               <div>
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono">
-                  POST → {config.baseUrl?.replace(/\/$/, '')}/api/assignment
+                  POST → {normalizeBaseUrl(config.baseUrl ?? '')}/api/assignment
                 </p>
               </div>
               <div className="flex items-center gap-2">

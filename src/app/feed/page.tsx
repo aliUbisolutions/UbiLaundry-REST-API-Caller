@@ -10,7 +10,7 @@ import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
 import {
   loadEnvironments, loadConversionTables, applyConversions, proxyGet,
-  loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES,
+  loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES, normalizeBaseUrl,
   type Environment, type ConversionTable, type FeedTemplate,
 } from '@/lib/storage';
 
@@ -646,8 +646,8 @@ export default function FeedPage() {
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
     const url = feedProtocol === 'soap'
-      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/services/UbiManager'}`
-      : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
+      ? `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`
+      : endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl));
     const headers: Record<string, string> = feedProtocol === 'soap'
       ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
       : { 'Content-Type': 'application/json', Accept: 'application/json' };
@@ -752,8 +752,8 @@ export default function FeedPage() {
     setResults(initial);
 
     const url = feedProtocol === 'soap'
-      ? `${config.baseUrl.replace(/\/$/, '')}${soapPath || '/services/UbiManager'}`
-      : endpoint!.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
+      ? `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`
+      : endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl));
     const headers: Record<string, string> = feedProtocol === 'soap'
       ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
       : { 'Content-Type': 'application/json', Accept: 'application/json' };
@@ -1032,7 +1032,7 @@ export default function FeedPage() {
                 ))}
               </div>
               <p className="font-mono text-xs text-violet-300 bg-slate-900 rounded px-3 py-2 break-all">
-                POST {config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}{soapPath || '/services/UbiManager'} → executeMacro({soapMacro || 'Assignment'})
+                POST {normalizeBaseUrl(config.baseUrl || '') || '<baseURL>'}{soapPath || '/services/UbiManager'} → executeMacro({soapMacro || 'Assignment'})
               </p>
             </div>
           )}
@@ -1632,8 +1632,8 @@ export default function FeedPage() {
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono truncate max-w-sm">
                   {feedProtocol === 'soap'
-                    ? `POST → ${config.baseUrl?.replace(/\/$/, '') || '<baseURL>'}${soapPath || '/services/UbiManager'} [SOAP: ${soapMacro || 'Assignment'}]`
-                    : `POST → ${endpoint!.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}`
+                    ? `POST → ${normalizeBaseUrl(config.baseUrl || '') || '<baseURL>'}${soapPath || '/services/UbiManager'} [SOAP: ${soapMacro || 'Assignment'}]`
+                    : `POST → ${endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl || '') || '<baseURL>')}`
                   }
                 </p>
               </div>
