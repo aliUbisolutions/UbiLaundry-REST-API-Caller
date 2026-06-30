@@ -81,7 +81,11 @@ function findBestId(text: string, items: LookupEntry[]): unknown {
 }
 
 function resolveFixed(value: string): unknown {
-  if (value.trim() === '__now') return new Date().toISOString();
+  const trimmed = value.trim();
+  if (trimmed === '__now') return new Date().toISOString();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try { return JSON.parse(trimmed); } catch { /* fall through */ }
+  }
   return coerce(value);
 }
 
@@ -1385,7 +1389,7 @@ export default function FeedPage() {
                             type="text"
                             value={ff.key}
                             onChange={e => updateFixed(i, 'key', e.target.value)}
-                            placeholder="field.path"
+                            placeholder="field or field.subfield"
                             className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
                           />
                           <span className="text-slate-600 text-xs">=</span>
@@ -1406,7 +1410,7 @@ export default function FeedPage() {
                                 type="text"
                                 value={ff.value}
                                 onChange={e => updateFixed(i, 'value', e.target.value)}
-                                placeholder="value"
+                                placeholder='value or {"id":123}'
                                 className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
                               />
                               <button
@@ -1427,6 +1431,9 @@ export default function FeedPage() {
                       ))}
                     </div>
                     <button onClick={addFixed} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Add fixed field</button>
+                    <p className="text-xs text-slate-600 mt-2">
+                      Use <span className="font-mono">field.subfield</span> for nested paths (e.g. <span className="font-mono">category.id = 5</span>), or a JSON object as the value (e.g. <span className="font-mono text-slate-500">{'{'}&#8202;&quot;id&quot;:5{'}'}</span>).
+                    </p>
                     {templatePaths.some(p => p.startsWith('@')) && (
                       <p className="text-xs text-yellow-600 mt-2">
                         Tip: this endpoint needs a <code>@class</code> field. Add it as a fixed field.
