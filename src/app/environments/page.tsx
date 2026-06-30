@@ -94,6 +94,16 @@ export default function EnvironmentsPage() {
     loadServerEnvs();
   };
 
+  const pushToServer = async (env: Environment) => {
+    const res = await fetch('/api/server-envs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: env.name, baseUrl: env.baseUrl, username: env.username, password: env.password }),
+    });
+    if (res.ok) { loadServerEnvs(); }
+    else { const d = await res.json(); alert(d.error ?? 'Failed to push environment to server.'); }
+  };
+
   const activate = (env: Environment | ServerEnvironment) => {
     saveActiveConfig({ baseUrl: env.baseUrl, username: env.username, password: env.password });
     alert(`"${env.name}" is now the active environment.`);
@@ -214,6 +224,13 @@ export default function EnvironmentsPage() {
           </button>
           {isAdmin && (
             <>
+              {target === 'local' && (
+                <button onClick={() => pushToServer(env as Environment)}
+                  title="Copy this environment to server storage"
+                  className="text-xs text-emerald-400 hover:text-white px-2.5 py-1.5 border border-emerald-700/50 hover:border-emerald-400 rounded transition-colors">
+                  → Server
+                </button>
+              )}
               <button onClick={() => openEdit(env as Environment, target)}
                 className="text-xs text-slate-400 hover:text-white px-2.5 py-1.5 border border-slate-600 rounded transition-colors">
                 Edit
