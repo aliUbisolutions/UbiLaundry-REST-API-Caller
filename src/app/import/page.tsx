@@ -273,7 +273,7 @@ async function loadCSVBatch(
 
 // ─── Excel parser (loads all rows at once — suitable for smaller files) ───────
 
-function parseExcelFile(file: File, customHeaderNames?: string[]): Promise<Row[]> {
+function parseExcelFile(file: File, customHeaderNames?: string[], idField = 'id'): Promise<Row[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -291,7 +291,32 @@ function parseExcelFile(file: File, customHeaderNames?: string[]): Promise<Row[]
         } else {
           raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
         }
+        if (idField !== 'id') {
+          raw = raw.map(r => {
+            if (!(idField in r)) return r;
+            const mapped = { ...r };
+            mapped['id'] = mapped[idField];
+            delete mapped[idField];
+            return mapped;
+          });
+        }
         resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function getExcelFirstRowHeaders(file: File): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target?.result as ArrayBuffer, { type: 'array', raw: false, cellDates: false });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        resolve(Object.keys(rows[0] ?? {}));
       } catch (err) { reject(err); }
     };
     reader.onerror = reject;
@@ -427,6 +452,10 @@ export default function ImportPage() {
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
   const [csvSep, setCsvSep]             = useState<string>('auto');
+  const [pendingIdPick, setPendingIdPick] = useState<{
+    file: File; headers: string[]; useHeader: boolean; headerOverride: string;
+  } | null>(null);
+  const [pickedIdColumn, setPickedIdColumn] = useState('');
   const [csvMeta, setCsvMeta]           = useState<CSVMeta | null>(null);
   const [batchOffsets, setBatchOffsets] = useState<number[]>([]);
   const [rows, setRows]                 = useState<Row[]>([]);
@@ -467,6 +496,7 @@ export default function ImportPage() {
   const pendingRef      = useRef<Map<number, Partial<RowResult>>>(new Map());
   const allExcelRowsRef = useRef<Row[]>([]);
   const currentFileRef  = useRef<File | null>(null);
+  const idFieldNameRef  = useRef('id');
 
   const targetEnv = useMemo(() =>
     envs.find(e => normalizeBaseUrl(e.baseUrl) === normalizeBaseUrl(config.baseUrl ?? '')),
@@ -488,9 +518,11 @@ export default function ImportPage() {
     [rows, reassign, returnValue, activeTables],
   );
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string, idField = 'id') => {
     currentFileRef.current = file;
     setParseError('');
+    setPendingIdPick(null);
+    setPickedIdColumn('');
     setRows([]);
     setCsvMeta(null);
     setBatchOffsets([]);
@@ -513,21 +545,35 @@ export default function ImportPage() {
       const isCSV = file.name.toLowerCase().endsWith('.csv');
       if (isCSV) {
         const { headers, sep, firstDataOffset } = await initCSV(file, customNames, csvSep);
-        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, headers, sep, firstDataOffset);
+        if (!headers.includes(idField)) {
+          setPendingIdPick({ file, headers, useHeader, headerOverride });
+          return;
+        }
+        const effectiveHeaders = idField !== 'id'
+          ? headers.map(h => h === idField ? 'id' : h)
+          : headers;
+        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, effectiveHeaders, sep, firstDataOffset);
         if (batch.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
           return;
         }
-        setCsvMeta({ file, headers, sep });
+        idFieldNameRef.current = idField;
+        setCsvMeta({ file, headers: effectiveHeaders, sep });
         setBatchOffsets(hasMore ? [firstDataOffset, nextOffset] : [firstDataOffset]);
         setHasMoreBatches(hasMore);
         setRows(batch);
       } else {
-        const allRows = await parseExcelFile(file, customNames);
+        const excelHeaders = customNames ?? await getExcelFirstRowHeaders(file);
+        if (!excelHeaders.includes(idField)) {
+          setPendingIdPick({ file, headers: excelHeaders, useHeader, headerOverride });
+          return;
+        }
+        const allRows = await parseExcelFile(file, customNames, idField);
         if (allRows.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
           return;
         }
+        idFieldNameRef.current = idField;
         allExcelRowsRef.current = allRows;
         setRows(allRows.slice(0, BATCH_SIZE));
         setHasMoreBatches(allRows.length > BATCH_SIZE);
@@ -541,28 +587,28 @@ export default function ImportPage() {
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) loadFile(file, hasHeader, customHeaders);
+    if (file) { idFieldNameRef.current = 'id'; loadFile(file, hasHeader, customHeaders, 'id'); }
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files?.[0];
-    if (file) loadFile(file, hasHeader, customHeaders);
+    if (file) { idFieldNameRef.current = 'id'; loadFile(file, hasHeader, customHeaders, 'id'); }
   };
 
   // Re-parse immediately when hasHeader toggles (skip on initial mount)
   const mountedRef = useRef(false);
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders, idFieldNameRef.current);
   }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-parse (debounced) when custom header names are edited
   useEffect(() => {
     if (hasHeader || !currentFileRef.current) return;
     const timer = setTimeout(() => {
-      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders);
+      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders, idFieldNameRef.current);
     }, 600);
     return () => clearTimeout(timer);
   }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -751,10 +797,19 @@ export default function ImportPage() {
     setRows([]); setCsvMeta(null); setBatchOffsets([]); setHasMoreBatches(false);
     setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
+    setPendingIdPick(null); setPickedIdColumn('');
+    idFieldNameRef.current = 'id';
     allExcelRowsRef.current = [];
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
   };
+
+  const confirmIdColumn = useCallback(() => {
+    if (!pendingIdPick || !pickedIdColumn) return;
+    const { file, useHeader, headerOverride } = pendingIdPick;
+    idFieldNameRef.current = pickedIdColumn;
+    loadFile(file, useHeader, headerOverride, pickedIdColumn);
+  }, [pendingIdPick, pickedIdColumn, loadFile]);
 
   const retryFailed = async () => {
     const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
@@ -1070,6 +1125,45 @@ export default function ImportPage() {
           )}
           {parseError && <p className="text-red-400 text-sm mt-3">{parseError}</p>}
         </div>
+
+        {/* Column picker — shown when no "id" column is detected */}
+        {pendingIdPick && (
+          <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg px-5 py-4 space-y-3">
+            <p className="text-amber-300 text-sm font-medium">
+              No <span className="font-mono">&quot;id&quot;</span> column found in{' '}
+              <span className="font-mono text-white">{pendingIdPick.file.name}</span>
+            </p>
+            <p className="text-slate-400 text-sm">Select which column contains the item identifier:</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={pickedIdColumn}
+                onChange={e => setPickedIdColumn(e.target.value)}
+                className="bg-slate-800 border border-slate-600 text-white text-sm rounded px-3 py-1.5 focus:outline-none focus:border-amber-500"
+              >
+                <option value="">— choose a column —</option>
+                {pendingIdPick.headers.map(h => (
+                  <option key={h} value={h}>{h}</option>
+                ))}
+              </select>
+              <button
+                onClick={confirmIdColumn}
+                disabled={!pickedIdColumn}
+                className="px-4 py-1.5 text-sm bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-medium"
+              >
+                Use as ID
+              </button>
+              <button
+                onClick={() => { setPendingIdPick(null); setPickedIdColumn(''); }}
+                className="px-3 py-1.5 text-sm text-slate-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Available columns: {pendingIdPick.headers.join(', ')}
+            </p>
+          </div>
+        )}
 
         {rows.length > 0 && (
           <>
