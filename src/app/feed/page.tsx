@@ -172,12 +172,15 @@ function parseFile(
   file: File,
   hasHeader: boolean,
   selectedSheets?: string[],
+  sep?: string,
 ): Promise<{ rows: Record<string, unknown>[]; sheetNames: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const wb = XLSX.read(e.target?.result, { type: 'binary', raw: false });
+        const opts: XLSX.ParsingOptions = { type: 'binary', raw: false };
+        if (sep && sep !== 'auto') opts.FS = sep;
+        const wb = XLSX.read(e.target?.result, opts);
         const sheetNames = wb.SheetNames;
         const target = selectedSheets ?? sheetNames;
         const rows: Record<string, unknown>[] = [];
@@ -331,6 +334,7 @@ export default function FeedPage() {
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [hasHeader, setHasHeader] = useState(true);
+  const [csvSep, setCsvSep] = useState<string>('auto');
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
   const [templates, setTemplates] = useState<FeedTemplate[]>(() => { try { return loadFeedTemplates(); } catch { return []; } });
@@ -440,7 +444,7 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[]) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[], sep?: string) => {
     currentFileRef.current = file;
     setParseError('');
     setRows([]);
@@ -449,7 +453,7 @@ export default function FeedPage() {
     setFileName(file.name);
     setTrimColumns(new Set());
     try {
-      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets);
+      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets, sep);
       setSheetNames(detected);
       if (!sheets) setSelectedSheets(detected);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
@@ -460,12 +464,12 @@ export default function FeedPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader);
+    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader);
+    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep);
   };
 
   const toggleSheet = (name: string) => {
@@ -473,7 +477,7 @@ export default function FeedPage() {
       ? selectedSheets.filter(s => s !== name)
       : [...selectedSheets, name];
     setSelectedSheets(next);
-    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next);
+    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next, csvSep);
   };
 
   const selectAllSheets = () => {
@@ -1082,6 +1086,15 @@ export default function FeedPage() {
                   />
                   <span className="text-sm text-slate-300">First row is header</span>
                 </label>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500">CSV sep:</span>
+                  {(['auto', ',', ';', '|'] as const).map(s => (
+                    <button key={s} onClick={() => { setCsvSep(s); if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, s); }}
+                      className={`text-xs px-2 py-0.5 rounded font-mono border transition-colors ${csvSep === s ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
                 {!hasHeader && (
                   <span className="text-xs text-slate-500">Columns will be named Column 1, Column 2, … — assign them in the mapping step below</span>
                 )}

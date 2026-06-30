@@ -166,7 +166,7 @@ const CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB per read
 // ─── CSV parser helpers ───────────────────────────────────────────────────────
 
 function detectSep(line: string): string {
-  const candidates = [',', ';', '\t'];
+  const candidates = [',', ';', '|', '\t'];
   let best = ','; let bestCount = 0;
   for (const sep of candidates) {
     let count = 0; let inQ = false;
@@ -224,12 +224,13 @@ function readBlobAsText(blob: Blob): Promise<string> {
 async function initCSV(
   file: File,
   customHeaderNames?: string[],
+  forceSep?: string,
 ): Promise<{ headers: string[]; sep: string; firstDataOffset: number }> {
   const head = await readBlobAsText(file.slice(0, Math.min(65536, file.size)));
   const clean = head.startsWith('﻿') ? head.slice(1) : head;
   const nlIdx = clean.indexOf('\n');
   const firstLine = (nlIdx >= 0 ? clean.slice(0, nlIdx) : clean).replace(/\r$/, '');
-  const sep = detectSep(firstLine);
+  const sep = (forceSep && forceSep !== 'auto') ? forceSep : detectSep(firstLine);
   if (customHeaderNames) {
     return { headers: customHeaderNames, sep, firstDataOffset: 0 };
   }
@@ -425,6 +426,7 @@ export default function ImportPage() {
   const [envs] = useState<Environment[]>(() => loadEnvironments());
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
+  const [csvSep, setCsvSep]             = useState<string>('auto');
   const [csvMeta, setCsvMeta]           = useState<CSVMeta | null>(null);
   const [batchOffsets, setBatchOffsets] = useState<number[]>([]);
   const [rows, setRows]                 = useState<Row[]>([]);
@@ -510,7 +512,7 @@ export default function ImportPage() {
     try {
       const isCSV = file.name.toLowerCase().endsWith('.csv');
       if (isCSV) {
-        const { headers, sep, firstDataOffset } = await initCSV(file, customNames);
+        const { headers, sep, firstDataOffset } = await initCSV(file, customNames, csvSep);
         const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, headers, sep, firstDataOffset);
         if (batch.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
@@ -966,6 +968,15 @@ export default function ImportPage() {
             />
             <span className="text-sm text-slate-300">First row is header</span>
           </label>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-500">CSV sep:</span>
+            {(['auto', ',', ';', '|'] as const).map(s => (
+              <button key={s} onClick={() => setCsvSep(s)}
+                className={`text-xs px-2 py-0.5 rounded font-mono border transition-colors ${csvSep === s ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}>
+                {s}
+              </button>
+            ))}
+          </div>
           {!hasHeader && (
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <label className="text-xs text-slate-400 shrink-0">Column names</label>
