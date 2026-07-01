@@ -8,6 +8,7 @@ import { endpoints } from '@/lib/endpoints';
 import type { PublicUser, ServerEnvironment } from '@/lib/data-store';
 
 const ALL_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'];
+const ALL_PROTOCOLS = ['SOAP'];
 
 const METHOD_COLORS: Record<string, string> = {
   GET: 'text-emerald-400',
@@ -15,6 +16,7 @@ const METHOD_COLORS: Record<string, string> = {
   PUT: 'text-blue-400',
   PATCH: 'text-orange-400',
   DELETE: 'text-red-400',
+  SOAP: 'text-amber-400',
 };
 
 interface UserForm {
@@ -297,6 +299,28 @@ export default function AdminUsersPage() {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Allowed protocols */}
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-2">Allowed protocols</label>
+                <div className="flex gap-2 flex-wrap">
+                  {ALL_PROTOCOLS.map(p => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => toggleMethod(p)}
+                      className={`px-3 py-1 rounded text-xs font-mono font-medium border transition-colors ${
+                        form.allowedMethods.includes(p)
+                          ? `bg-amber-700 border-amber-600 ${METHOD_COLORS[p]}`
+                          : 'bg-slate-900 text-slate-400 border-slate-600 hover:border-amber-600'
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-600 mt-1.5">Grant access to SOAP calls (Bulk Feeder &amp; Import pages)</p>
               </div>
 
               {/* Server env access */}

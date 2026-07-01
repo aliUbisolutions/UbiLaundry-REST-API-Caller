@@ -311,6 +311,8 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
 export default function FeedPage() {
   const { user } = useAuth();
 
+  const canUseSoap = !user || user.profile === 'admin' || user.allowedMethods.includes('SOAP');
+
   const postEndpoints = useMemo(() => {
     const all = endpoints.filter(e => e.method === 'POST');
     if (!user || user.allowedEndpoints === 'all') return all;
@@ -550,6 +552,11 @@ export default function FeedPage() {
       setFieldLookups({});
     }
   };
+
+  // If user loses SOAP access (permission change), reset protocol to REST.
+  useEffect(() => {
+    if (!canUseSoap && feedProtocol === 'soap') setFeedProtocol('rest');
+  }, [canUseSoap, feedProtocol]);
 
   // When a new file is loaded (columnNames changes) while mapping mode is on,
   // preserve existing valid mappings and try to re-match the rest.
@@ -945,10 +952,12 @@ export default function FeedPage() {
               <input type="radio" name="feed-protocol" value="rest" checked={feedProtocol === 'rest'} onChange={() => setFeedProtocol('rest')} className="accent-blue-500" />
               <span className="text-sm text-slate-300">REST</span>
             </label>
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <input type="radio" name="feed-protocol" value="soap" checked={feedProtocol === 'soap'} onChange={() => { setFeedProtocol('soap'); setSelectedId(''); }} className="accent-blue-500" />
-              <span className="text-sm text-slate-300">SOAP</span>
-            </label>
+            {canUseSoap && (
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="feed-protocol" value="soap" checked={feedProtocol === 'soap'} onChange={() => { setFeedProtocol('soap'); setSelectedId(''); }} className="accent-blue-500" />
+                <span className="text-sm text-slate-300">SOAP</span>
+              </label>
+            )}
           </div>
 
           {feedProtocol === 'rest' && (

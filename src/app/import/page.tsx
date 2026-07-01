@@ -10,6 +10,7 @@ import {
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
+import { useAuth } from '@/components/AuthContext';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
@@ -445,6 +446,9 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
 };
 
 export default function ImportPage() {
+  const { user } = useAuth();
+  const canUseSoap = !user || user.profile === 'admin' || user.allowedMethods.includes('SOAP');
+
   const [config] = useState<Config>(() => {
     try { return JSON.parse(localStorage.getItem('ubilaundry-config') ?? '{}'); } catch { return {}; }
   });
@@ -596,6 +600,11 @@ export default function ImportPage() {
     const file = e.dataTransfer.files?.[0];
     if (file) { idFieldNameRef.current = 'id'; loadFile(file, hasHeader, customHeaders, 'id'); }
   };
+
+  // If user loses SOAP access, reset to REST.
+  useEffect(() => {
+    if (!canUseSoap && protocol === 'soap') setProtocol('rest');
+  }, [canUseSoap, protocol]);
 
   // Re-parse immediately when hasHeader toggles (skip on initial mount)
   const mountedRef = useRef(false);
@@ -1177,11 +1186,13 @@ export default function ImportPage() {
                     <input type="radio" name="import-protocol" value="rest" checked={protocol === 'rest'} onChange={() => setProtocol('rest')} className="accent-blue-500" />
                     <span className="text-sm text-slate-300">REST</span>
                   </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input type="radio" name="import-protocol" value="soap" checked={protocol === 'soap'} onChange={() => setProtocol('soap')} className="accent-blue-500" />
-                    <span className="text-sm text-slate-300">SOAP</span>
-                  </label>
-                  {protocol === 'soap' && (
+                  {canUseSoap && (
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input type="radio" name="import-protocol" value="soap" checked={protocol === 'soap'} onChange={() => setProtocol('soap')} className="accent-blue-500" />
+                      <span className="text-sm text-slate-300">SOAP</span>
+                    </label>
+                  )}
+                  {canUseSoap && protocol === 'soap' && (
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-slate-400">Path</span>
                       <input

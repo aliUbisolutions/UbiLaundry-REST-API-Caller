@@ -25,6 +25,15 @@ async function handleRequest(request: NextRequest) {
     );
   }
 
+  // Enforce SOAP protocol access (detected via SOAPAction header)
+  const isSoapCall = reqHeaders && Object.keys(reqHeaders).some(k => k.toLowerCase() === 'soapaction');
+  if (isSoapCall && allowedMethods.length > 0 && !allowedMethods.includes('SOAP')) {
+    return NextResponse.json(
+      { error: 'SOAP calls are not allowed for your account' },
+      { status: 403 }
+    );
+  }
+
   // Enforce per-user allowed endpoints
   const allowedEndpoints: string[] | 'all' = JSON.parse(request.headers.get('x-user-endpoints') ?? '"all"');
   if (endpointId && allowedEndpoints !== 'all' && !allowedEndpoints.includes(endpointId)) {
