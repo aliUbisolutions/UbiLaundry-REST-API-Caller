@@ -8,6 +8,12 @@ export interface Endpoint {
   body: string;
   description: string;
   queryParams: { key: string; value: string; description: string }[];
+  /** How the Authorization header is built. Defaults to 'basic' (existing behavior). */
+  authType?: 'basic' | 'bearer' | 'none';
+  /** For authType 'bearer': id of the endpoint whose JSON response's `token` field supplies the token. */
+  tokenSourceId?: string;
+  /** If true, the request body edited in the panel is saved locally (encrypted) and restored on reload. */
+  persistBodyEncrypted?: boolean;
 }
 
 export const endpoints: Endpoint[] = [
@@ -1644,5 +1650,31 @@ export const endpoints: Endpoint[] = [
     "description": "",
     "queryParams": [],
     "id": "ep_140"
+  },
+  {
+    "group": "SmartWeapon",
+    "subgroup": "Authentication",
+    "name": "Get Ubi Token",
+    "method": "POST",
+    "url": "{{baseURL}}/WebServices/MobileAccess/GetUbiToken/",
+    "body": "{\n  \"username\": \"\",\n  \"password\": \"\"\n}",
+    "description": "Authenticate against the Mobile Access API and obtain a bearer token used by the SmartWeapon calls.\n\nResponse:\n| Field | Type | Description |\n| --- | --- | --- |\n| token | string | Bearer token |\n| generationDateUTC | datetime | When the token was issued |\n| peremptionDateUTC | datetime | Expiry — request a new token after this date |\n\nThe username/password entered here are saved locally on this device, encrypted — they are never committed to the codebase and are not sent anywhere except this request.\nThe token is captured automatically and reused by \"Operator Restitution\".",
+    "queryParams": [],
+    "authType": "none",
+    "persistBodyEncrypted": true,
+    "id": "ep_141"
+  },
+  {
+    "group": "SmartWeapon",
+    "subgroup": "Operator Restitution",
+    "name": "Operator Restitution",
+    "method": "POST",
+    "url": "{{baseURL}}/WebServices/SmartWeapon/OperatorRestitution",
+    "body": "{\n    \"date\": \"2026-06-24T09:50:00Z\",\n    \"workstationId\": 1,\n    \"operatorId\": 87,\n    \"supervisorOperatorId\": 87,\n    \"locationId\": 7,\n    \"photo\": null,\n    \"signature\": null,\n    \"itemIds\": [\n        22, 74, 156, 157, 230, 373, 374\n    ],\n    \"anomalies\": []\n}",
+    "description": "Reports an operator restitution (weapon return). Requires a bearer token — call \"Get Ubi Token\" first; the token is picked up automatically.",
+    "queryParams": [],
+    "authType": "bearer",
+    "tokenSourceId": "ep_141",
+    "id": "ep_142"
   }
 ];
