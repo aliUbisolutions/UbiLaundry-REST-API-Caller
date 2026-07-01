@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
   if (!user.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
-  const body = await request.json() as Omit<CallHistoryRecord, 'id' | 'userId' | 'username'>;
+  const body = await request.json() as Omit<CallHistoryRecord, 'id' | 'userId'>;
   const record: CallHistoryRecord = {
     ...body,
     id: genId(),
