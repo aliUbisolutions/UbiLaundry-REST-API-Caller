@@ -1343,7 +1343,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_120"
   },
   {
-    "group": "Assignment",
+    "group": "Laundry",
     "subgroup": "Assignment",
     "name": "Assignment",
     "method": "POST",
@@ -1354,8 +1354,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_121"
   },
   {
-    "group": "Reports",
-    "subgroup": "Create report",
+    "group": "Laundry",
+    "subgroup": "Reports",
     "name": "Create report",
     "method": "POST",
     "url": "{{baseURL}}/api/createReport",
@@ -1365,8 +1365,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_122"
   },
   {
-    "group": "Reports",
-    "subgroup": "Create reports",
+    "group": "Laundry",
+    "subgroup": "Reports",
     "name": "Create reports",
     "method": "POST",
     "url": "{{baseURL}}/api/createReports",
@@ -1376,8 +1376,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_123"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery",
     "method": "GET",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.all",
@@ -1387,8 +1387,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_124"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery / limit",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery / limit",
     "method": "GET",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.all",
@@ -1398,8 +1398,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_125"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery",
     "method": "POST",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.byrfid",
@@ -1409,8 +1409,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_126"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery/limit",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery/limit",
     "method": "POST",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.byrfid",
@@ -1420,7 +1420,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_127"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetBLNumber",
     "name": "GetBLNumber",
     "method": "GET",
@@ -1431,7 +1431,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_128"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderItems",
     "name": "GetDeliveryOrderItems",
     "method": "GET",
@@ -1448,7 +1448,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_129"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderItemsByLastMovement",
     "name": "GetDeliveryOrderItemsByLastMovement",
     "method": "GET",
@@ -1475,7 +1475,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_130"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderVcn",
     "name": "GetDeliveryOrderVcn",
     "method": "GET",
@@ -1492,7 +1492,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_131"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderVcns",
     "name": "GetDeliveryOrderVcns",
     "method": "GET",
@@ -1519,7 +1519,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_132"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "getItemDetailsCustomerRejected",
     "name": "getItemDetailsCustomerRejected",
     "method": "GET",
@@ -1551,7 +1551,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_133"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "getItemWashCount",
     "name": "getItemWashCount",
     "method": "GET",
@@ -1562,7 +1562,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_134"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDepartementLocation",
     "name": "GetDepartementLocation",
     "method": "GET",
@@ -1579,7 +1579,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_135"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetClientLocation",
     "name": "GetClientLocation",
     "method": "GET",
@@ -1596,7 +1596,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_136"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetRound",
     "name": "GetRound",
     "method": "GET",
@@ -1613,8 +1613,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_137"
   },
   {
-    "group": "getServerTime",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Server",
     "name": "getServerTime",
     "method": "GET",
     "url": "{{baseURL}}/api/getServerTime",
@@ -1624,8 +1624,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_138"
   },
   {
-    "group": "getShortCategory",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Short lookups",
     "name": "getShortCategory",
     "method": "GET",
     "url": "{{baseURL}}/api/getShortCategory/300ED89F335000800028E081",
@@ -1635,8 +1635,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_139"
   },
   {
-    "group": "getShortItem",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Short lookups",
     "name": "getShortItem",
     "method": "GET",
     "url": "{{baseURL}}/api/getShortItem/300ED89F335000800028E081",
