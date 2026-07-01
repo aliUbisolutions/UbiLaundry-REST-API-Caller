@@ -11,6 +11,8 @@ import {
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
+import { postHistory } from '@/lib/history-client';
+import type { BatchRecord } from '@/lib/history-client';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
@@ -623,7 +625,9 @@ export default function ImportPage() {
   }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Core sending logic — used by both single-batch and all-batches import.
-  const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]) => {
+  const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]): Promise<BatchRecord> => {
+    const batchStartedAt = new Date().toISOString();
+    const batchT0 = Date.now();
     setRunning(true);
     setDone(false);
     setExpandedIdx(null);
@@ -634,9 +638,13 @@ export default function ImportPage() {
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
+    const finalStatus = new Array<RowStatus>(targetRows.length).fill('pending');
+    const finalElapsed: number[] = [];
     const update = (index: number, patch: Partial<RowResult>) => {
       const prev = pendingRef.current.get(index) ?? {};
       pendingRef.current.set(index, { ...prev, ...patch });
+      if (patch.status) finalStatus[index] = patch.status;
+      if (patch.elapsed != null) finalElapsed.push(patch.elapsed);
     };
     const flush = () => {
       if (pendingRef.current.size === 0) return;
@@ -712,14 +720,52 @@ export default function ImportPage() {
     flush();
     setRunning(false);
     setDone(true);
+
+    const ok = finalStatus.filter(s => s === 'ok').length;
+    const errors = finalStatus.filter(s => s === 'error').length;
+    const skipped = finalStatus.filter(s => s === 'skipped' || s === 'pending').length;
+    const avgElapsedMs = finalElapsed.length > 0
+      ? Math.round(finalElapsed.reduce((a, b) => a + b, 0) / finalElapsed.length)
+      : null;
+    return {
+      batchNum: 0, // set by caller
+      startedAt: batchStartedAt,
+      durationMs: Date.now() - batchT0,
+      total: targetRows.length,
+      ok,
+      errors,
+      skipped,
+      avgElapsedMs,
+    };
   };
+
+  const buildHistoryBase = () => ({
+    username: user?.username ?? '',
+    environment: normalizeBaseUrl(config.baseUrl ?? ''),
+    environmentName: targetEnv?.name ?? normalizeBaseUrl(config.baseUrl ?? ''),
+    protocol: protocol as 'rest' | 'soap',
+    operation: protocol === 'soap' ? 'Assignment (SOAP)' : 'POST /api/assignment',
+    sourceFile: fileName,
+  });
 
   const runImport = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (rows.length === 0) return;
     setShowPreview(false);
     abortRef.current = false;
-    await sendBatch(rows, previewPayloads);
+    const sessionStart = new Date().toISOString();
+    const stats = await sendBatch(rows, previewPayloads);
+    stats.batchNum = 1;
+    await postHistory({
+      ...buildHistoryBase(),
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: stats.total,
+      totalOk: stats.ok,
+      totalErrors: stats.errors,
+      totalSkipped: stats.skipped,
+      batches: [stats],
+    });
   };
 
   const runAllBatchesImport = async () => {
@@ -728,6 +774,8 @@ export default function ImportPage() {
     abortRef.current = false;
     setAutoMode('import');
 
+    const sessionStart = new Date().toISOString();
+    const allBatches: BatchRecord[] = [];
     let batchIdx = currentBatch;
     let batchRows = rows;
     // nextLoadOffset: byte position in CSV file where the next batch to load starts
@@ -738,7 +786,9 @@ export default function ImportPage() {
       setRows(batchRows);
       setCurrentBatch(batchIdx);
       setAutoBatchNum(batchIdx + 1);
-      await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+      const stats = await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+      stats.batchNum = allBatches.length + 1;
+      allBatches.push(stats);
 
       if (abortRef.current || !stillHasMore) break;
 
@@ -767,6 +817,16 @@ export default function ImportPage() {
     }
 
     setAutoMode(null);
+    await postHistory({
+      ...buildHistoryBase(),
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: allBatches.reduce((s, b) => s + b.total, 0),
+      totalOk: allBatches.reduce((s, b) => s + b.ok, 0),
+      totalErrors: allBatches.reduce((s, b) => s + b.errors, 0),
+      totalSkipped: allBatches.reduce((s, b) => s + b.skipped, 0),
+      batches: allBatches,
+    });
   };
 
   const stop = () => { abortRef.current = true; };

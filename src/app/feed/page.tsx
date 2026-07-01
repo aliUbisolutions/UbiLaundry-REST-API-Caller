@@ -8,6 +8,7 @@ import { endpoints, type Endpoint } from '@/lib/endpoints';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
+import { postHistory } from '@/lib/history-client';
 import {
   loadEnvironments, loadConversionTables, applyConversions, proxyGet,
   loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES, normalizeBaseUrl,
@@ -759,6 +760,11 @@ export default function FeedPage() {
     setDone(false);
     setExpandedIdx(null);
 
+    const sessionStart = new Date().toISOString();
+    const batchT0 = Date.now();
+    const finalStatus: string[] = new Array(rows.length).fill('pending');
+    const elapsedTimes: number[] = [];
+
     const initial: RowResult[] = rows.map((row, i) => ({
       index: i,
       rowPreview: String(Object.values(row)[0] ?? `row ${i + 1}`).slice(0, 40),
@@ -778,6 +784,8 @@ export default function FeedPage() {
     const update = (i: number, patch: Partial<RowResult>) => {
       const prev = pendingRef.current.get(i) ?? {};
       pendingRef.current.set(i, { ...prev, ...patch });
+      if (patch.status) finalStatus[i] = patch.status;
+      if (patch.elapsed != null) elapsedTimes.push(patch.elapsed);
     };
     const flush = () => {
       if (pendingRef.current.size === 0) return;
@@ -860,6 +868,41 @@ export default function FeedPage() {
     flush();
     setRunning(false);
     setDone(true);
+
+    const ok = finalStatus.filter(s => s === 'ok' || s === 'ok-substituted').length;
+    const errors = finalStatus.filter(s => s === 'error').length;
+    const skipped = finalStatus.filter(s => s === 'pending').length;
+    const avgElapsedMs = elapsedTimes.length > 0
+      ? Math.round(elapsedTimes.reduce((a, b) => a + b, 0) / elapsedTimes.length)
+      : null;
+    const envEntry = allEnvs.find(e => normalizeBaseUrl(e.baseUrl) === normalizeBaseUrl(config.baseUrl ?? ''));
+    const operationLabel = feedProtocol === 'soap'
+      ? `SOAP ${soapMacro || 'executeMacro'}`
+      : endpoint ? `${endpoint.method} ${endpoint.name}` : 'unknown';
+    await postHistory({
+      username: user?.username ?? '',
+      environment: normalizeBaseUrl(config.baseUrl ?? ''),
+      environmentName: envEntry?.name ?? normalizeBaseUrl(config.baseUrl ?? ''),
+      protocol: feedProtocol,
+      operation: operationLabel,
+      sourceFile: fileName,
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: rows.length,
+      totalOk: ok,
+      totalErrors: errors,
+      totalSkipped: skipped,
+      batches: [{
+        batchNum: 1,
+        startedAt: sessionStart,
+        durationMs: Date.now() - batchT0,
+        total: rows.length,
+        ok,
+        errors,
+        skipped,
+        avgElapsedMs,
+      }],
+    });
   };
 
   const counts = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);

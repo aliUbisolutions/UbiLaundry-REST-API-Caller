@@ -37,7 +37,8 @@ export async function proxy(request: NextRequest) {
   }
 
   // Admin-only paths
-  if (pathname.startsWith('/admin') || pathname.startsWith('/api/users')) {
+  if (pathname.startsWith('/admin') || pathname.startsWith('/api/users') ||
+      pathname.startsWith('/history') || pathname.startsWith('/api/history')) {
     if (payload.profile !== 'admin') {
       return NextResponse.redirect(new URL('/', request.url));
     }
@@ -46,6 +47,7 @@ export async function proxy(request: NextRequest) {
   // Forward user identity to API routes via headers
   const headers = new Headers(request.headers);
   headers.set('x-user-id', payload.sub);
+  headers.set('x-user-username', payload.username);
   headers.set('x-user-profile', payload.profile);
   headers.set('x-user-methods', JSON.stringify(payload.allowedMethods));
   headers.set('x-user-env-access', JSON.stringify(payload.serverEnvAccess));

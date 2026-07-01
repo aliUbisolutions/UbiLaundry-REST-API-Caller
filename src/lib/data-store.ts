@@ -187,3 +187,55 @@ export function deleteServerConversion(id: string): boolean {
   writeServerConversions(next);
   return true;
 }
+
+// ─── Call history ─────────────────────────────────────────────────────────────
+
+export interface BatchRecord {
+  batchNum: number;
+  startedAt: string;
+  durationMs: number;
+  total: number;
+  ok: number;
+  errors: number;
+  skipped: number;
+  avgElapsedMs: number | null;
+}
+
+export interface CallHistoryRecord {
+  id: string;
+  userId: string;
+  username: string;
+  environment: string;
+  environmentName: string;
+  protocol: 'rest' | 'soap';
+  operation: string;
+  sourceFile: string;
+  startedAt: string;
+  endedAt: string;
+  totalRows: number;
+  totalOk: number;
+  totalErrors: number;
+  totalSkipped: number;
+  batches: BatchRecord[];
+}
+
+const MAX_HISTORY = 5000;
+
+function readHistory(): CallHistoryRecord[] {
+  return readFile<CallHistoryRecord[]>('call-history.json', []);
+}
+
+export function listHistory(): CallHistoryRecord[] {
+  return readHistory();
+}
+
+export function appendHistory(record: CallHistoryRecord): void {
+  const history = readHistory();
+  history.unshift(record);
+  if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+  writeFile('call-history.json', history);
+}
+
+export function clearHistory(): void {
+  writeFile('call-history.json', []);
+}
