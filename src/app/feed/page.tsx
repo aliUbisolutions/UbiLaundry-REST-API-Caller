@@ -157,9 +157,9 @@ function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; valu
 
 // ─── File parsing ─────────────────────────────────────────────────────────────
 
-function parseSheetRows(ws: XLSX.WorkSheet, hasHeader: boolean): Record<string, unknown>[] {
+function parseSheetRows(ws: XLSX.WorkSheet, hasHeader: boolean, skipRows: number): Record<string, unknown>[] {
   if (!hasHeader) {
-    const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false });
+    const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false, range: skipRows });
     if (arrays.length === 0) return [];
     const numCols = Math.max(...arrays.map(row => (row as unknown[]).length));
     const colNames = Array.from({ length: numCols }, (_, i) => `Column ${i + 1}`);
@@ -169,7 +169,7 @@ function parseSheetRows(ws: XLSX.WorkSheet, hasHeader: boolean): Record<string, 
       return obj;
     }).filter(r => Object.values(r).some(v => v !== '' && v !== null));
   }
-  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false, range: skipRows });
   return raw.filter(r => Object.values(r).some(v => v !== '' && v !== null));
 }
 
@@ -178,6 +178,7 @@ function parseFile(
   hasHeader: boolean,
   selectedSheets?: string[],
   sep?: string,
+  skipRows = 0,
 ): Promise<{ rows: Record<string, unknown>[]; sheetNames: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -191,7 +192,7 @@ function parseFile(
         const rows: Record<string, unknown>[] = [];
         for (const name of target) {
           const ws = wb.Sheets[name];
-          if (ws) rows.push(...parseSheetRows(ws, hasHeader));
+          if (ws) rows.push(...parseSheetRows(ws, hasHeader, skipRows));
         }
         resolve({ rows, sheetNames });
       } catch (err) { reject(err); }
@@ -342,6 +343,7 @@ export default function FeedPage() {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [hasHeader, setHasHeader] = useState(true);
   const [csvSep, setCsvSep] = useState<string>('auto');
+  const [skipRows, setSkipRows] = useState(0);
   const [sheetNames, setSheetNames] = useState<string[]>([]);
   const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
   const [templates, setTemplates] = useState<FeedTemplate[]>(() => { try { return loadFeedTemplates(); } catch { return []; } });
@@ -451,7 +453,7 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[], sep?: string) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[], sep?: string, skip = 0) => {
     currentFileRef.current = file;
     setParseError('');
     setRows([]);
@@ -460,7 +462,7 @@ export default function FeedPage() {
     setFileName(file.name);
     setTrimColumns(new Set());
     try {
-      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets, sep);
+      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets, sep, skip);
       setSheetNames(detected);
       if (!sheets) setSelectedSheets(detected);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
@@ -471,12 +473,12 @@ export default function FeedPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep);
+    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep, skipRows);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep);
+    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep, skipRows);
   };
 
   const toggleSheet = (name: string) => {
@@ -484,19 +486,19 @@ export default function FeedPage() {
       ? selectedSheets.filter(s => s !== name)
       : [...selectedSheets, name];
     setSelectedSheets(next);
-    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next, csvSep);
+    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next, csvSep, skipRows);
   };
 
   const selectAllSheets = () => {
     setSelectedSheets(sheetNames);
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, sheetNames);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, sheetNames, csvSep, skipRows);
   };
 
-  // Re-parse immediately when hasHeader toggles (skip on initial mount)
+  // Re-parse immediately when hasHeader or skipRows changes (skip on initial mount)
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length > 0 ? selectedSheets : undefined);
-  }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length > 0 ? selectedSheets : undefined, csvSep, skipRows);
+  }, [hasHeader, skipRows]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
@@ -590,6 +592,7 @@ export default function FeedPage() {
     setFieldMappings({});
     setFieldLookups({});
     setSheetNames([]); setSelectedSheets([]);
+    setSkipRows(0);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
     // Don't reset soapFieldPaths — user keeps their field list when re-uploading a file
@@ -1145,12 +1148,23 @@ export default function FeedPage() {
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-slate-500">CSV sep:</span>
                   {(['auto', ',', ';', '|'] as const).map(s => (
-                    <button key={s} onClick={() => { setCsvSep(s); if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, s); }}
+                    <button key={s} onClick={() => { setCsvSep(s); if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, s, skipRows); }}
                       className={`text-xs px-2 py-0.5 rounded font-mono border transition-colors ${csvSep === s ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}>
                       {s}
                     </button>
                   ))}
                 </div>
+                <label className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500">Skip first</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={skipRows}
+                    onChange={e => setSkipRows(Math.max(0, Number(e.target.value) || 0))}
+                    className="w-14 bg-slate-900 border border-slate-600 text-white text-xs rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-500"
+                  />
+                  <span className="text-xs text-slate-500">row{skipRows === 1 ? '' : 's'}</span>
+                </label>
                 {!hasHeader && (
                   <span className="text-xs text-slate-500">Columns will be named Column 1, Column 2, … — assign them in the mapping step below</span>
                 )}
