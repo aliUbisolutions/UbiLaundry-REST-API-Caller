@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
 import {
-  loadEnvironments, loadConversionTables, applyConversions, normalizeBaseUrl,
+  loadAllEnvironments, loadConversionTables, applyConversions, normalizeBaseUrl,
   type Environment, type ConversionTable, type ConversionNote,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
@@ -454,8 +454,10 @@ export default function ImportPage() {
   const [config] = useState<Config>(() => {
     try { return JSON.parse(localStorage.getItem('ubilaundry-config') ?? '{}'); } catch { return {}; }
   });
-  const [envs] = useState<Environment[]>(() => loadEnvironments());
+  const [envs, setEnvs] = useState<Environment[]>([]);
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
+
+  useEffect(() => { loadAllEnvironments().then(setEnvs); }, []);
 
   const [csvSep, setCsvSep]             = useState<string>('auto');
   const [pendingIdPick, setPendingIdPick] = useState<{

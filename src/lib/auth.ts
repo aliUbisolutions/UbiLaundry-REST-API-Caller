@@ -9,12 +9,11 @@ function getSecret(): Uint8Array {
 }
 
 export interface JWTPayload {
-  sub: string;       // user id
-  username: string;
-  profile: 'admin' | 'user';
-  allowedMethods: string[];
-  serverEnvAccess: string[] | 'all';
-  allowedEndpoints: string[] | 'all';
+  sub: string; // user id — the only claim carried by the token.
+  // Profile, allowedMethods, etc. are intentionally NOT stored here: they are
+  // looked up fresh from the data store on every request (see proxy.ts and
+  // /api/auth/me), so that an admin revoking or demoting a user takes effect
+  // immediately instead of waiting for that user's token to expire.
 }
 
 export async function signToken(payload: JWTPayload): Promise<string> {

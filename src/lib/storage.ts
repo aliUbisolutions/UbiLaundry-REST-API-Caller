@@ -51,6 +51,19 @@ export function saveEnvironments(envs: Environment[]): void {
   localStorage.setItem(ENVS_KEY, JSON.stringify(envs));
 }
 
+// Local environments (this browser) plus server-stored ones the current user can see.
+export async function loadAllEnvironments(): Promise<Environment[]> {
+  const local = loadEnvironments();
+  try {
+    const res = await fetch('/api/server-envs');
+    if (!res.ok) return local;
+    const server = await res.json() as Environment[];
+    return [...local, ...server];
+  } catch {
+    return local;
+  }
+}
+
 // ─── Conversion tables ────────────────────────────────────────────────────────
 
 function migrate(tables: ConversionTable[]): ConversionTable[] {

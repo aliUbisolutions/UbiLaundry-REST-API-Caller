@@ -10,7 +10,7 @@ import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
 import { postHistory } from '@/lib/history-client';
 import {
-  loadEnvironments, loadConversionTables, applyConversions, proxyGet,
+  loadAllEnvironments, loadConversionTables, applyConversions, proxyGet,
   loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES, normalizeBaseUrl,
   type Environment, type ConversionTable, type FeedTemplate,
 } from '@/lib/storage';
@@ -370,8 +370,10 @@ export default function FeedPage() {
   const [soapFieldPaths, setSoapFieldPaths] = useState<string[]>([]);
 
   // Conversion state
-  const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
+  const [allEnvs, setAllEnvs] = useState<Environment[]>([]);
   const [allTables] = useState<ConversionTable[]>(() => { try { return loadConversionTables(); } catch { return []; } });
+
+  useEffect(() => { loadAllEnvironments().then(setAllEnvs); }, []);
   const [useConversion, setUseConversion]   = useState(false);
   const [sourceEnvId, setSourceEnvId]       = useState('');
   const [selectedTableIds, setSelectedTableIds] = useState<string[]>([]);
