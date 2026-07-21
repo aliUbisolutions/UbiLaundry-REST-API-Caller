@@ -83,7 +83,7 @@ export interface FeedTemplate {
   trimColumns: string[];
   useMappingMode: boolean;
   fieldMappings: Record<string, string>;
-  fixedFields: { key: string; value: string }[];
+  fixedFields: { key: string; value: string; lookup?: { entityType: string; envId: string } }[];
   fieldLookups?: Record<string, { entityType: string; envId: string }>;
   soapMode?: boolean;
   soapPath?: string;

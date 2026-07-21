@@ -331,7 +331,9 @@ export default function FeedPage() {
   const [fileName, setFileName] = useState('');
   const [parseError, setParseError] = useState('');
   const [dragging, setDragging] = useState(false);
-  const [fixedFields, setFixedFields] = useState<{ key: string; value: string }[]>([]);
+  const [fixedFields, setFixedFields] = useState<{ key: string; value: string; lookup?: { entityType: string; envId: string } }[]>([]);
+  const [fixedPickerIdx, setFixedPickerIdx] = useState<number | null>(null);
+  const [fixedPickerSearch, setFixedPickerSearch] = useState('');
   const [trimColumns, setTrimColumns] = useState<Set<string>>(new Set());
   const [useMappingMode, setUseMappingMode] = useState(false);
   const [fieldMappings, setFieldMappings] = useState<Record<string, string>>({});
@@ -504,7 +506,17 @@ export default function FeedPage() {
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
 
   const addFixed = () => setFixedFields(prev => [...prev, { key: '', value: '' }]);
-  const removeFixed = (i: number) => setFixedFields(prev => prev.filter((_, idx) => idx !== i));
+  const removeFixed = (i: number) => {
+    setFixedFields(prev => prev.filter((_, idx) => idx !== i));
+    setFixedPickerIdx(prev => prev === i ? null : prev);
+  };
+
+  const setFixedLookup = (i: number, cfg: { entityType: string; envId: string } | null) =>
+    setFixedFields(prev => prev.map((ff, idx) => {
+      if (idx !== i) return ff;
+      if (!cfg) { const next = { ...ff }; delete next.lookup; return next; }
+      return { ...ff, lookup: cfg };
+    }));
 
   const toggleTrimColumn = (col: string) =>
     setTrimColumns(prev => { const next = new Set(prev); if (next.has(col)) next.delete(col); else next.add(col); return next; });
@@ -532,6 +544,17 @@ export default function FeedPage() {
       if (cfg) { next[path] = cfg; loadLookupEntities(cfg.envId, cfg.entityType); }
       else delete next[path];
       return next;
+    });
+  };
+
+  const toggleFixedPicker = (i: number) => {
+    setFixedPickerSearch('');
+    setFixedPickerIdx(prev => {
+      if (prev === i) return null;
+      const cfg = fixedFields[i]?.lookup ?? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' };
+      setFixedLookup(i, cfg);
+      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+      return i;
     });
   };
 
@@ -593,6 +616,7 @@ export default function FeedPage() {
     setFieldLookups({});
     setSheetNames([]); setSelectedSheets([]);
     setSkipRows(0);
+    setFixedPickerIdx(null);
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
     // Don't reset soapFieldPaths — user keeps their field list when re-uploading a file
@@ -630,6 +654,7 @@ export default function FeedPage() {
     setUseMappingMode(tpl.useMappingMode);
     setFieldMappings({ ...tpl.fieldMappings });
     setFixedFields(tpl.fixedFields.map(f => ({ ...f })));
+    for (const f of tpl.fixedFields) if (f.lookup) loadLookupEntities(f.lookup.envId, f.lookup.entityType);
     const lookups = tpl.fieldLookups ?? {};
     setFieldLookups(lookups);
     for (const cfg of Object.values(lookups)) loadLookupEntities(cfg.envId, cfg.entityType);
@@ -1449,56 +1474,146 @@ export default function FeedPage() {
                   {/* Fixed fields */}
                   <div>
                     <div className="space-y-2 mb-2">
-                      {fixedFields.map((ff, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={ff.key}
-                            onChange={e => updateFixed(i, 'key', e.target.value)}
-                            placeholder="field or field.subfield"
-                            className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
-                          />
-                          <span className="text-slate-600 text-xs">=</span>
-                          {ff.value === '__now' ? (
-                            <div className="flex-1 flex items-center gap-1">
-                              <span className="flex-1 bg-slate-900 border border-violet-700 text-violet-300 text-xs rounded px-2 py-1.5 font-mono">
-                                current datetime
-                              </span>
-                              <button
-                                onClick={() => updateFixed(i, 'value', '')}
-                                className="text-slate-600 hover:text-slate-400 text-xs px-1"
-                                title="Clear"
-                              >×</button>
-                            </div>
-                          ) : (
-                            <>
+                      {fixedFields.map((ff, i) => {
+                        const lookup = ff.lookup ?? null;
+                        const cacheKey = lookup ? `${lookup.envId}:${lookup.entityType}` : '';
+                        const cacheEntries = cacheKey ? lookupCache[cacheKey] : undefined;
+                        const isLoadingLookup = cacheKey ? lookupLoading.has(cacheKey) : false;
+                        const resolvedName = lookup && cacheEntries
+                          ? cacheEntries.find(e => String(e.id) === ff.value.trim())?.name
+                          : undefined;
+                        const pickerOpen = fixedPickerIdx === i;
+                        const filteredEntries = (cacheEntries ?? [])
+                          .filter(e => !fixedPickerSearch.trim() || e.name.toLowerCase().includes(fixedPickerSearch.trim().toLowerCase()));
+                        return (
+                          <div key={i} className="space-y-1.5">
+                            <div className="flex items-center gap-2">
                               <input
                                 type="text"
-                                value={ff.value}
-                                onChange={e => updateFixed(i, 'value', e.target.value)}
-                                placeholder='value or {"id":123}'
+                                value={ff.key}
+                                onChange={e => updateFixed(i, 'key', e.target.value)}
+                                placeholder="field or field.subfield"
                                 className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
                               />
-                              <button
-                                onClick={() => updateFixed(i, 'value', '__now')}
-                                title="Use current datetime"
-                                className="text-slate-500 hover:text-violet-400 transition-colors shrink-0 text-xs px-1"
-                              >
-                                ⏱
+                              <span className="text-slate-600 text-xs">=</span>
+                              {ff.value === '__now' ? (
+                                <div className="flex-1 flex items-center gap-1">
+                                  <span className="flex-1 bg-slate-900 border border-violet-700 text-violet-300 text-xs rounded px-2 py-1.5 font-mono">
+                                    current datetime
+                                  </span>
+                                  <button
+                                    onClick={() => updateFixed(i, 'value', '')}
+                                    className="text-slate-600 hover:text-slate-400 text-xs px-1"
+                                    title="Clear"
+                                  >×</button>
+                                </div>
+                              ) : (
+                                <>
+                                  <input
+                                    type="text"
+                                    value={ff.value}
+                                    onChange={e => updateFixed(i, 'value', e.target.value)}
+                                    placeholder='value or {"id":123}'
+                                    className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                                  />
+                                  <button
+                                    onClick={() => toggleFixedPicker(i)}
+                                    title="Browse objects and pick an ID by name"
+                                    className={`transition-colors shrink-0 text-xs px-1 ${pickerOpen ? 'text-violet-400' : 'text-slate-500 hover:text-violet-400'}`}
+                                  >
+                                    🔎
+                                  </button>
+                                  <button
+                                    onClick={() => updateFixed(i, 'value', '__now')}
+                                    title="Use current datetime"
+                                    className="text-slate-500 hover:text-violet-400 transition-colors shrink-0 text-xs px-1"
+                                  >
+                                    ⏱
+                                  </button>
+                                </>
+                              )}
+                              <button onClick={() => removeFixed(i)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
                               </button>
-                            </>
-                          )}
-                          <button onClick={() => removeFixed(i)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
-                        </div>
-                      ))}
+                            </div>
+
+                            {lookup && !pickerOpen && ff.value.trim() && (
+                              resolvedName
+                                ? <p className="text-xs text-emerald-400 pl-1">✓ {resolvedName}</p>
+                                : !isLoadingLookup && cacheEntries && <p className="text-xs text-amber-500 pl-1">No {lookup.entityType} found with id {ff.value.trim()}</p>
+                            )}
+
+                            {pickerOpen && (
+                              <div className="bg-slate-900 border border-violet-700/50 rounded-lg p-3 space-y-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <select
+                                    value={lookup?.entityType ?? ENTITY_TYPES[0]}
+                                    onChange={e => {
+                                      const cfg = { entityType: e.target.value, envId: lookup?.envId ?? allEnvs[0]?.id ?? '' };
+                                      setFixedLookup(i, cfg);
+                                      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+                                    }}
+                                    className="bg-slate-800 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                  >
+                                    {ENTITY_TYPES.map(et => <option key={et} value={et}>{et}</option>)}
+                                  </select>
+                                  <span className="text-slate-600 text-[11px]">from</span>
+                                  <select
+                                    value={lookup?.envId ?? ''}
+                                    onChange={e => {
+                                      const cfg = { entityType: lookup?.entityType ?? ENTITY_TYPES[0], envId: e.target.value };
+                                      setFixedLookup(i, cfg);
+                                      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+                                    }}
+                                    className="bg-slate-800 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                  >
+                                    {allEnvs.length === 0
+                                      ? <option value="">— no environments —</option>
+                                      : allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)
+                                    }
+                                  </select>
+                                  <button onClick={() => setFixedPickerIdx(null)} className="ml-auto text-slate-500 hover:text-white text-xs px-1">✕</button>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={fixedPickerSearch}
+                                  onChange={e => setFixedPickerSearch(e.target.value)}
+                                  placeholder="Search by name…"
+                                  autoFocus
+                                  className="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-violet-500 placeholder:text-slate-600"
+                                />
+                                {isLoadingLookup && <p className="text-xs text-slate-500">Loading…</p>}
+                                {!isLoadingLookup && cacheEntries && (
+                                  <div className="max-h-40 overflow-y-auto space-y-0.5">
+                                    {filteredEntries.length === 0 && (
+                                      <p className="text-xs text-slate-600 py-1">No match.</p>
+                                    )}
+                                    {filteredEntries.slice(0, 50).map(e => (
+                                      <button
+                                        key={String(e.id)}
+                                        onClick={() => { updateFixed(i, 'value', String(e.id)); setFixedPickerIdx(null); }}
+                                        className="w-full flex items-center gap-2 text-left px-2 py-1 rounded hover:bg-violet-900/30 transition-colors"
+                                      >
+                                        <span className="text-violet-400 text-xs font-mono shrink-0">#{String(e.id)}</span>
+                                        <span className="text-slate-300 text-xs truncate">{e.name}</span>
+                                      </button>
+                                    ))}
+                                    {filteredEntries.length > 50 && (
+                                      <p className="text-xs text-slate-600 pt-1">Showing first 50 of {filteredEntries.length} matches — refine your search.</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     <button onClick={addFixed} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Add fixed field</button>
                     <p className="text-xs text-slate-600 mt-2">
-                      Use <span className="font-mono">field.subfield</span> for nested paths (e.g. <span className="font-mono">category.id = 5</span>), or a JSON object as the value (e.g. <span className="font-mono text-slate-500">{'{'}&#8202;&quot;id&quot;:5{'}'}</span>).
+                      Use <span className="font-mono">field.subfield</span> for nested paths (e.g. <span className="font-mono">category.id = 5</span>), or a JSON object as the value (e.g. <span className="font-mono text-slate-500">{'{'}&#8202;&quot;id&quot;:5{'}'}</span>). Click 🔎 to browse objects by name and pick an ID.
                     </p>
                     {templatePaths.some(p => p.startsWith('@')) && (
                       <p className="text-xs text-yellow-600 mt-2">
