@@ -358,7 +358,6 @@ export default function FeedPage() {
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
   const currentFileRef = useRef<File | null>(null);
-  const mountedRef     = useRef(false);
 
   // SOAP state
   const [feedProtocol, setFeedProtocol] = useState<'rest' | 'soap'>('rest');
@@ -500,12 +499,6 @@ export default function FeedPage() {
     setSelectedSheets(sheetNames);
     if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, sheetNames, csvSep, skipRows);
   };
-
-  // Re-parse immediately when hasHeader or skipRows changes (skip on initial mount)
-  useEffect(() => {
-    if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length > 0 ? selectedSheets : undefined, csvSep, skipRows);
-  }, [hasHeader, skipRows]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
@@ -674,6 +667,9 @@ export default function FeedPage() {
     } else {
       setFeedProtocol('rest');
       setSoapFieldPaths([]);
+    }
+    if (currentFileRef.current) {
+      loadFile(currentFileRef.current, tpl.hasHeader, selectedSheets.length ? selectedSheets : undefined, csvSep, skipRows);
     }
   };
 
@@ -1170,7 +1166,11 @@ export default function FeedPage() {
                   <input
                     type="checkbox"
                     checked={hasHeader}
-                    onChange={e => setHasHeader(e.target.checked)}
+                    onChange={e => {
+                      const next = e.target.checked;
+                      setHasHeader(next);
+                      if (currentFileRef.current) loadFile(currentFileRef.current, next, selectedSheets.length ? selectedSheets : undefined, csvSep, skipRows);
+                    }}
                     className="accent-blue-500 w-4 h-4"
                   />
                   <span className="text-sm text-slate-300">First row is header</span>
@@ -1190,7 +1190,11 @@ export default function FeedPage() {
                     type="number"
                     min={0}
                     value={skipRows}
-                    onChange={e => setSkipRows(Math.max(0, Number(e.target.value) || 0))}
+                    onChange={e => {
+                      const next = Math.max(0, Number(e.target.value) || 0);
+                      setSkipRows(next);
+                      if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, csvSep, next);
+                    }}
                     className="w-14 bg-slate-900 border border-slate-600 text-white text-xs rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-500"
                   />
                   <span className="text-xs text-slate-500">row{skipRows === 1 ? '' : 's'}</span>
