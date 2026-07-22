@@ -464,7 +464,10 @@ export default function FeedPage() {
     setResults([]);
     setDone(false);
     setFileName(file.name);
-    setTrimColumns(new Set());
+    // Don't reset trimColumns/fixedFields/mapping here — a template (or the
+    // operator's own choices) may already have set them as a base config, and
+    // toggling a parse option like "first row is header" re-parses the same
+    // file without meaning to discard that base.
     try {
       const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets, sep, skip);
       setSheetNames(detected);
