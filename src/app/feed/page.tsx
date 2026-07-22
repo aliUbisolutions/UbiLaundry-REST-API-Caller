@@ -358,6 +358,10 @@ export default function FeedPage() {
   const fileRef        = useRef<HTMLInputElement>(null);
   const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
   const currentFileRef = useRef<File | null>(null);
+  // Set while a template is being applied so the columnNames auto-remap effect
+  // leaves the template's mappings verbatim for the reparse it triggers,
+  // instead of second-guessing the operator's saved choices.
+  const applyingTemplateRef = useRef(false);
 
   // SOAP state
   const [feedProtocol, setFeedProtocol] = useState<'rest' | 'soap'>('rest');
@@ -586,6 +590,9 @@ export default function FeedPage() {
   // preserve existing valid mappings and try to re-match the rest.
   useEffect(() => {
     if (!useMappingMode || effectivePaths.length === 0 || columnNames.length === 0) return;
+    // A template application just set the mappings deliberately — don't auto-remap
+    // over them. Consume the flag so the next genuine file load re-matches normally.
+    if (applyingTemplateRef.current) { applyingTemplateRef.current = false; return; }
     setFieldMappings(prev => {
       const next: Record<string, string> = {};
       for (const path of effectivePaths) {
@@ -646,6 +653,10 @@ export default function FeedPage() {
   };
 
   const applyTemplate = (tpl: FeedTemplate) => {
+    // Only guard the auto-remap when this template actually carries mappings to
+    // protect; otherwise a mapping-less template would leave the flag set and
+    // suppress auto-matching on the next unrelated file load.
+    applyingTemplateRef.current = tpl.useMappingMode || !!tpl.soapMode;
     setSelectedId(tpl.endpointId);
     setHasHeader(tpl.hasHeader);
     setTrimColumns(new Set(tpl.trimColumns));
