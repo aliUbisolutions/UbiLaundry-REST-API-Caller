@@ -73,6 +73,20 @@ There are two user profiles:
 
 → See [User Management](#user-management--admin-users) below.
 
+#### Forgot a password?
+
+Passwords are stored as bcrypt hashes and can't be recovered, but you can reset one from the machine (or Docker volume) that holds the app's data:
+
+```bash
+npm run reset-password -- --list                       # list existing users
+npm run reset-password -- <username> <newPassword>     # reset an existing user
+npm run reset-password -- <username> <newPassword> --create-admin   # create a fresh admin
+```
+
+The script writes to the same data store the app uses (`DATA_DIR` if set — e.g. the Docker volume — otherwise `./data`). For Docker, run it inside the container so it targets the mounted volume, e.g. `docker compose exec app npm run reset-password -- --list`.
+
+If no users exist at all, you can instead delete `users.json` from the data store and reopen the app to run first-time setup again.
+
 ---
 
 ### Home — API Explorer (`/`)
