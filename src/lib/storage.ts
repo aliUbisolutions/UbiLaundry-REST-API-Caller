@@ -30,9 +30,10 @@ export interface ConversionTable {
 
 // ─── Key constants ────────────────────────────────────────────────────────────
 
-export const ACTIVE_CONFIG_KEY = 'ubilaundry-config';
-export const ENVS_KEY          = 'ubilaundry-environments';
-export const TABLES_KEY        = 'ubilaundry-conversion-tables';
+export const ACTIVE_CONFIG_KEY   = 'ubilaundry-config';
+export const ENVS_KEY            = 'ubilaundry-environments';
+export const TABLES_KEY          = 'ubilaundry-conversion-tables';
+export const FEED_TEMPLATES_KEY  = 'ubilaundry-feed-templates';
 
 // ─── ID generator ─────────────────────────────────────────────────────────────
 
@@ -48,6 +49,19 @@ export function loadEnvironments(): Environment[] {
 
 export function saveEnvironments(envs: Environment[]): void {
   localStorage.setItem(ENVS_KEY, JSON.stringify(envs));
+}
+
+// Local environments (this browser) plus server-stored ones the current user can see.
+export async function loadAllEnvironments(): Promise<Environment[]> {
+  const local = loadEnvironments();
+  try {
+    const res = await fetch('/api/server-envs');
+    if (!res.ok) return local;
+    const server = await res.json() as Environment[];
+    return [...local, ...server];
+  } catch {
+    return local;
+  }
 }
 
 // ─── Conversion tables ────────────────────────────────────────────────────────
@@ -70,6 +84,35 @@ export function loadConversionTables(): ConversionTable[] {
 
 export function saveConversionTables(tables: ConversionTable[]): void {
   localStorage.setItem(TABLES_KEY, JSON.stringify(tables));
+}
+
+// ─── Feed templates ───────────────────────────────────────────────────────────
+
+export interface FeedTemplate {
+  id: string;
+  name: string;
+  endpointId: string;
+  hasHeader: boolean;
+  trimColumns: string[];
+  useMappingMode: boolean;
+  fieldMappings: Record<string, string>;
+  fixedFields: { key: string; value: string; lookup?: { entityType: string; envId: string } }[];
+  fieldLookups?: Record<string, { entityType: string; envId: string }>;
+  soapMode?: boolean;
+  soapPath?: string;
+  soapMacro?: string;
+  soapParamName?: string;
+  soapXsiType?: string;
+  soapReassign?: boolean;
+  soapFieldPaths?: string[];
+}
+
+export function loadFeedTemplates(): FeedTemplate[] {
+  try { return JSON.parse(localStorage.getItem(FEED_TEMPLATES_KEY) ?? '[]'); } catch { return []; }
+}
+
+export function saveFeedTemplates(templates: FeedTemplate[]): void {
+  localStorage.setItem(FEED_TEMPLATES_KEY, JSON.stringify(templates));
 }
 
 // ─── Active config ────────────────────────────────────────────────────────────
@@ -100,10 +143,19 @@ export const ENTITY_TYPES = [
 
 export type EntityType = typeof ENTITY_TYPES[number];
 
+// ─── URL helpers ──────────────────────────────────────────────────────────────
+
+export function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
 // ─── Proxy helper ─────────────────────────────────────────────────────────────
 
 export async function proxyGet(env: Environment, path: string): Promise<unknown[]> {
-  const url = `${env.baseUrl.replace(/\/$/, '')}${path}`;
+  const url = `${normalizeBaseUrl(env.baseUrl)}${path}`;
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (env.username) headers['Authorization'] = 'Basic ' + btoa(`${env.username}:${env.password}`);
 

@@ -32,14 +32,7 @@ export async function POST(request: NextRequest) {
   };
   createUser(user);
 
-  const token = await signToken({
-    sub: user.id,
-    username: user.username,
-    profile: user.profile,
-    allowedMethods: user.allowedMethods,
-    serverEnvAccess: user.serverEnvAccess,
-    allowedEndpoints: user.allowedEndpoints,
-  });
+  const token = await signToken({ sub: user.id });
 
   const response = NextResponse.json({ ok: true });
   response.cookies.set(JWT_COOKIE, token, {

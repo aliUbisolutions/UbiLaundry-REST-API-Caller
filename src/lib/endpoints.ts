@@ -8,6 +8,12 @@ export interface Endpoint {
   body: string;
   description: string;
   queryParams: { key: string; value: string; description: string }[];
+  /** How the Authorization header is built. Defaults to 'basic' (existing behavior). */
+  authType?: 'basic' | 'bearer' | 'none';
+  /** For authType 'bearer': id of the endpoint whose JSON response's `token` field supplies the token. */
+  tokenSourceId?: string;
+  /** If true, the request body edited in the panel is saved locally (encrypted) and restored on reload. */
+  persistBodyEncrypted?: boolean;
 }
 
 export const endpoints: Endpoint[] = [
@@ -1343,7 +1349,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_120"
   },
   {
-    "group": "Assignment",
+    "group": "Laundry",
     "subgroup": "Assignment",
     "name": "Assignment",
     "method": "POST",
@@ -1354,8 +1360,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_121"
   },
   {
-    "group": "Reports",
-    "subgroup": "Create report",
+    "group": "Laundry",
+    "subgroup": "Reports",
     "name": "Create report",
     "method": "POST",
     "url": "{{baseURL}}/api/createReport",
@@ -1365,8 +1371,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_122"
   },
   {
-    "group": "Reports",
-    "subgroup": "Create reports",
+    "group": "Laundry",
+    "subgroup": "Reports",
     "name": "Create reports",
     "method": "POST",
     "url": "{{baseURL}}/api/createReports",
@@ -1376,8 +1382,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_123"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery",
     "method": "GET",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.all",
@@ -1387,8 +1393,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_124"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery / limit",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery / limit",
     "method": "GET",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.all",
@@ -1398,8 +1404,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_125"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery",
     "method": "POST",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.byrfid",
@@ -1409,8 +1415,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_126"
   },
   {
-    "group": "findWithNamedQuery",
-    "subgroup": "namedQuery/limit",
+    "group": "Laundry",
+    "subgroup": "Named queries",
     "name": "namedQuery/limit",
     "method": "POST",
     "url": "{{baseURL}}/api/findWithNamedQuery/Category.byrfid",
@@ -1420,7 +1426,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_127"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetBLNumber",
     "name": "GetBLNumber",
     "method": "GET",
@@ -1431,7 +1437,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_128"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderItems",
     "name": "GetDeliveryOrderItems",
     "method": "GET",
@@ -1448,7 +1454,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_129"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderItemsByLastMovement",
     "name": "GetDeliveryOrderItemsByLastMovement",
     "method": "GET",
@@ -1475,7 +1481,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_130"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderVcn",
     "name": "GetDeliveryOrderVcn",
     "method": "GET",
@@ -1492,7 +1498,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_131"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDeliveryOrderVcns",
     "name": "GetDeliveryOrderVcns",
     "method": "GET",
@@ -1519,7 +1525,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_132"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "getItemDetailsCustomerRejected",
     "name": "getItemDetailsCustomerRejected",
     "method": "GET",
@@ -1551,7 +1557,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_133"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "getItemWashCount",
     "name": "getItemWashCount",
     "method": "GET",
@@ -1562,7 +1568,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_134"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetDepartementLocation",
     "name": "GetDepartementLocation",
     "method": "GET",
@@ -1579,7 +1585,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_135"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetClientLocation",
     "name": "GetClientLocation",
     "method": "GET",
@@ -1596,7 +1602,7 @@ export const endpoints: Endpoint[] = [
     "id": "ep_136"
   },
   {
-    "group": "laundy",
+    "group": "Laundry",
     "subgroup": "GetRound",
     "name": "GetRound",
     "method": "GET",
@@ -1613,8 +1619,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_137"
   },
   {
-    "group": "getServerTime",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Server",
     "name": "getServerTime",
     "method": "GET",
     "url": "{{baseURL}}/api/getServerTime",
@@ -1624,8 +1630,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_138"
   },
   {
-    "group": "getShortCategory",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Short lookups",
     "name": "getShortCategory",
     "method": "GET",
     "url": "{{baseURL}}/api/getShortCategory/300ED89F335000800028E081",
@@ -1635,8 +1641,8 @@ export const endpoints: Endpoint[] = [
     "id": "ep_139"
   },
   {
-    "group": "getShortItem",
-    "subgroup": "",
+    "group": "Laundry",
+    "subgroup": "Short lookups",
     "name": "getShortItem",
     "method": "GET",
     "url": "{{baseURL}}/api/getShortItem/300ED89F335000800028E081",
@@ -1644,5 +1650,31 @@ export const endpoints: Endpoint[] = [
     "description": "",
     "queryParams": [],
     "id": "ep_140"
+  },
+  {
+    "group": "SmartWeapon",
+    "subgroup": "Authentication",
+    "name": "Get Ubi Token",
+    "method": "POST",
+    "url": "{{baseURL}}/WebServices/MobileAccess/GetUbiToken/",
+    "body": "{\n  \"username\": \"\",\n  \"password\": \"\"\n}",
+    "description": "Authenticate against the Mobile Access API and obtain a bearer token used by the SmartWeapon calls.\n\nResponse:\n| Field | Type | Description |\n| --- | --- | --- |\n| token | string | Bearer token |\n| generationDateUTC | datetime | When the token was issued |\n| peremptionDateUTC | datetime | Expiry — request a new token after this date |\n\nThe username/password entered here are saved locally on this device, encrypted — they are never committed to the codebase and are not sent anywhere except this request.\nThe token is captured automatically and reused by \"Operator Restitution\".",
+    "queryParams": [],
+    "authType": "none",
+    "persistBodyEncrypted": true,
+    "id": "ep_141"
+  },
+  {
+    "group": "SmartWeapon",
+    "subgroup": "Operator Restitution",
+    "name": "Operator Restitution",
+    "method": "POST",
+    "url": "{{baseURL}}/WebServices/SmartWeapon/OperatorRestitution",
+    "body": "{\n    \"date\": \"2026-06-24T09:50:00Z\",\n    \"workstationId\": 1,\n    \"operatorId\": 87,\n    \"supervisorOperatorId\": 87,\n    \"locationId\": 7,\n    \"photo\": null,\n    \"signature\": null,\n    \"itemIds\": [\n        22, 74, 156, 157, 230, 373, 374\n    ],\n    \"anomalies\": []\n}",
+    "description": "Reports an operator restitution (weapon return). Requires a bearer token — call \"Get Ubi Token\" first; the token is picked up automatically.",
+    "queryParams": [],
+    "authType": "bearer",
+    "tokenSourceId": "ep_141",
+    "id": "ep_142"
   }
 ];

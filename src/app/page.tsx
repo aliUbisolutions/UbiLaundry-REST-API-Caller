@@ -6,11 +6,13 @@ import ConfigBar, { type Config } from '@/components/ConfigBar';
 import Sidebar from '@/components/Sidebar';
 import EndpointPanel from '@/components/EndpointPanel';
 import { endpoints } from '@/lib/endpoints';
+import { useIsAdmin } from '@/components/AuthContext';
 
 const DEFAULT_CONFIG: Config = { baseUrl: '', username: '', password: '' };
 const STORAGE_KEY = 'ubilaundry-config';
 
 export default function Home() {
+  const isAdmin = useIsAdmin();
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -41,6 +43,7 @@ export default function Home() {
               { href: '/import',       label: 'Bulk Assignment Import',  icon: 'M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12' },
               { href: '/conversions',  label: 'Conversion Tables',       icon: 'M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4' },
               { href: '/environments', label: 'Environments',            icon: 'M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2' },
+              ...(isAdmin ? [{ href: '/history', label: 'Call History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' }] : []),
             ].map(({ href, label, icon }) => (
               <Link key={href} href={href}
                 className="flex items-center gap-2 w-full px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800 rounded transition-colors">

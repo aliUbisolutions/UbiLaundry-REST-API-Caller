@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "reset-password": "node scripts/reset-password.mjs"
   },
   "dependencies": {
     "@types/bcryptjs": "^2.4.6",

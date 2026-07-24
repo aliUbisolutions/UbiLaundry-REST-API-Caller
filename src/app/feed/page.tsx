@@ -8,9 +8,11 @@ import { endpoints, type Endpoint } from '@/lib/endpoints';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
 import { useAuth } from '@/components/AuthContext';
+import { postHistory } from '@/lib/history-client';
 import {
-  loadEnvironments, loadConversionTables, applyConversions,
-  type Environment, type ConversionTable,
+  loadAllEnvironments, loadConversionTables, applyConversions, proxyGet,
+  loadFeedTemplates, saveFeedTemplates, genId, ENTITY_TYPES, normalizeBaseUrl,
+  type Environment, type ConversionTable, type FeedTemplate,
 } from '@/lib/storage';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -59,6 +61,35 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown) {
   cur[keys[keys.length - 1]] = value;
 }
 
+interface LookupEntry { id: unknown; name: string; }
+
+function findBestId(text: string, items: LookupEntry[]): unknown {
+  if (!text || items.length === 0) return null;
+  const needle = text.trim().toLowerCase();
+  // 1. Exact
+  let m = items.find(i => i.name.toLowerCase() === needle);
+  if (m) return m.id;
+  // 2. Starts with
+  m = items.find(i => i.name.toLowerCase().startsWith(needle));
+  if (m) return m.id;
+  // 3. Contains
+  m = items.find(i => i.name.toLowerCase().includes(needle));
+  if (m) return m.id;
+  // 4. All words present
+  const words = needle.split(/\s+/).filter(Boolean);
+  m = items.find(i => words.every(w => i.name.toLowerCase().includes(w)));
+  return m ? m.id : null;
+}
+
+function resolveFixed(value: string): unknown {
+  const trimmed = value.trim();
+  if (trimmed === '__now') return new Date().toISOString();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try { return JSON.parse(trimmed); } catch { /* fall through */ }
+  }
+  return coerce(value);
+}
+
 function rowToJson(
   row: Record<string, unknown>,
   fixedFields: { key: string; value: string }[],
@@ -66,7 +97,7 @@ function rowToJson(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
-    if (key.trim()) setPath(result, key.trim(), coerce(value));
+    if (key.trim()) setPath(result, key.trim(), resolveFixed(value));
   }
   for (const [k, v] of Object.entries(row)) {
     const key = k.trim();
@@ -84,53 +115,171 @@ function rowToJsonMapped(
   mappings: Record<string, string>,
   fixedFields: { key: string; value: string }[],
   trimColumns: Set<string>,
+  templateValues: Record<string, unknown>,
+  lookupItems: Record<string, LookupEntry[] | undefined>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const { key, value } of fixedFields) {
-    if (key.trim()) setPath(result, key.trim(), coerce(value));
+    if (key.trim()) setPath(result, key.trim(), resolveFixed(value));
   }
   for (const [fieldPath, src] of Object.entries(mappings)) {
     if (!src) continue;
     if (src === '__null') {
       setPath(result, fieldPath, null);
+    } else if (src === '__template') {
+      setPath(result, fieldPath, templateValues[fieldPath] ?? null);
     } else {
       const raw = row[src] ?? null;
       const val = (trimColumns.has(src) && raw !== null && raw !== undefined)
         ? String(raw).replace(/\s+/g, '')
         : raw;
-      setPath(result, fieldPath, coerce(val));
+      if (fieldPath in lookupItems) {
+        const items = lookupItems[fieldPath];
+        const text = val !== null && val !== undefined ? String(val) : null;
+        setPath(result, fieldPath, (text && items) ? (findBestId(text, items) ?? null) : null);
+      } else {
+        setPath(result, fieldPath, coerce(val));
+      }
     }
   }
   return result;
 }
 
 
-function extractPaths(obj: unknown, prefix = ''): string[] {
-  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return prefix ? [prefix] : [];
+function extractPathsWithValues(obj: unknown, prefix = ''): { path: string; value: unknown }[] {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return prefix ? [{ path: prefix, value: obj }] : [];
   return Object.entries(obj as Record<string, unknown>).flatMap(([k, v]) => {
     const path = prefix ? `${prefix}.${k}` : k;
-    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return extractPaths(v, path);
-    return [path];
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) return extractPathsWithValues(v, path);
+    return [{ path, value: v }];
   });
 }
 
 // ─── File parsing ─────────────────────────────────────────────────────────────
 
-function parseFile(file: File): Promise<Record<string, unknown>[]> {
+function parseSheetRows(ws: XLSX.WorkSheet, hasHeader: boolean, skipRows: number): Record<string, unknown>[] {
+  if (!hasHeader) {
+    const arrays = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', raw: false, range: skipRows });
+    if (arrays.length === 0) return [];
+    const numCols = Math.max(...arrays.map(row => (row as unknown[]).length));
+    const colNames = Array.from({ length: numCols }, (_, i) => `Column ${i + 1}`);
+    return arrays.map(row => {
+      const obj: Record<string, unknown> = {};
+      colNames.forEach((h, i) => { obj[h] = (row as unknown[])[i] ?? ''; });
+      return obj;
+    }).filter(r => Object.values(r).some(v => v !== '' && v !== null));
+  }
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false, range: skipRows });
+  return raw.filter(r => Object.values(r).some(v => v !== '' && v !== null));
+}
+
+function parseFile(
+  file: File,
+  hasHeader: boolean,
+  selectedSheets?: string[],
+  sep?: string,
+  skipRows = 0,
+): Promise<{ rows: Record<string, unknown>[]; sheetNames: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const wb = XLSX.read(e.target?.result, { type: 'binary', raw: false });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
-        resolve(raw.filter(r => Object.values(r).some(v => v !== '' && v !== null)));
+        const opts: XLSX.ParsingOptions = { type: 'binary', raw: false };
+        if (sep && sep !== 'auto') opts.FS = sep;
+        const wb = XLSX.read(e.target?.result, opts);
+        const sheetNames = wb.SheetNames;
+        const target = selectedSheets ?? sheetNames;
+        const rows: Record<string, unknown>[] = [];
+        for (const name of target) {
+          const ws = wb.Sheets[name];
+          if (ws) rows.push(...parseSheetRows(ws, hasHeader, skipRows));
+        }
+        resolve({ rows, sheetNames });
       } catch (err) { reject(err); }
     };
     reader.onerror = reject;
     reader.readAsBinaryString(file);
   });
 }
+
+// ─── SOAP helpers ─────────────────────────────────────────────────────────────
+
+function escapeXmlFeed(s: unknown): string {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function jsonToXml(obj: Record<string, unknown>, depth: number): string {
+  const pad = '  '.repeat(depth);
+  return Object.entries(obj)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => {
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        const inner = jsonToXml(v as Record<string, unknown>, depth + 1);
+        return inner ? `${pad}<${k}>\n${inner}\n${pad}</${k}>` : `${pad}<${k}/>`;
+      }
+      return `${pad}<${k}>${escapeXmlFeed(v)}</${k}>`;
+    })
+    .join('\n');
+}
+
+function buildFeedSoapEnvelope(
+  itemJson: Record<string, unknown>,
+  macroName: string,
+  paramName: string,
+  xsiType: string,
+  reassign: boolean,
+): string {
+  const itemXml = jsonToXml(itemJson, 5);
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://ws.ubimanager.ubisolutions.net/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <tns:executeMacro>
+      <macro>${escapeXmlFeed(macroName)}</macro>
+      <params>
+        <params>
+          <name>${escapeXmlFeed(paramName)}</name>
+          <value xsi:type="${escapeXmlFeed(xsiType)}">
+${itemXml}
+          </value>
+        </params>
+        <params>
+          <name>reassign</name>
+          <value xsi:type="xsd:boolean">${reassign}</value>
+        </params>
+      </params>
+    </tns:executeMacro>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+function parseFeedSoapFault(xml: string): string | null {
+  const m = xml.match(/<(?:[\w]+:)?faultstring[^>]*>([\s\S]*?)<\/(?:[\w]+:)?faultstring>/i);
+  if (m) return m[1].trim();
+  return /<(?:[\w]+:)?Fault[\s>]/i.test(xml) ? 'SOAP Fault (no detail)' : null;
+}
+
+// ─── SOAP presets ─────────────────────────────────────────────────────────────
+
+const SOAP_PRESETS: Record<string, { macro: string; path: string; paramName: string; xsiType: string; fieldPaths: string[] }> = {
+  Assignment: {
+    macro: 'Assignment',
+    path: '/services/UbiManager',
+    paramName: 'item',
+    xsiType: 'tns:Item',
+    fieldPaths: [
+      'id',
+      'encodingDate',
+      'firstSeenDate',
+      'lastSeenDate',
+      'category.id',
+      'lastSeenLocation.id',
+      'lastSeenWorkstation.id',
+      'lastMovementType.id',
+      'lastReportLocation.id',
+      'comment',
+    ],
+  },
+};
 
 // ─── Status icon ─────────────────────────────────────────────────────────────
 
@@ -164,6 +313,8 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
 export default function FeedPage() {
   const { user } = useAuth();
 
+  const canUseSoap = !user || user.profile === 'admin' || user.allowedMethods.includes('SOAP');
+
   const postEndpoints = useMemo(() => {
     const all = endpoints.filter(e => e.method === 'POST');
     if (!user || user.allowedEndpoints === 'all') return all;
@@ -180,7 +331,9 @@ export default function FeedPage() {
   const [fileName, setFileName] = useState('');
   const [parseError, setParseError] = useState('');
   const [dragging, setDragging] = useState(false);
-  const [fixedFields, setFixedFields] = useState<{ key: string; value: string }[]>([]);
+  const [fixedFields, setFixedFields] = useState<{ key: string; value: string; lookup?: { entityType: string; envId: string } }[]>([]);
+  const [fixedPickerIdx, setFixedPickerIdx] = useState<number | null>(null);
+  const [fixedPickerSearch, setFixedPickerSearch] = useState('');
   const [trimColumns, setTrimColumns] = useState<Set<string>>(new Set());
   const [useMappingMode, setUseMappingMode] = useState(false);
   const [fieldMappings, setFieldMappings] = useState<Record<string, string>>({});
@@ -190,13 +343,40 @@ export default function FeedPage() {
   const [showPreview, setShowPreview] = useState(false);
   const [previewIdx, setPreviewIdx] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-  const abortRef   = useRef(false);
-  const fileRef    = useRef<HTMLInputElement>(null);
-  const pendingRef = useRef<Map<number, Partial<RowResult>>>(new Map());
+  const [hasHeader, setHasHeader] = useState(true);
+  const [csvSep, setCsvSep] = useState<string>('auto');
+  const [skipRows, setSkipRows] = useState(0);
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [selectedSheets, setSelectedSheets] = useState<string[]>([]);
+  const [templates, setTemplates] = useState<FeedTemplate[]>(() => { try { return loadFeedTemplates(); } catch { return []; } });
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('');
+  const [fieldLookups, setFieldLookups] = useState<Record<string, { entityType: string; envId: string }>>({});
+  const [lookupCache, setLookupCache] = useState<Record<string, LookupEntry[]>>({});
+  const [lookupLoading, setLookupLoading] = useState<Set<string>>(new Set());
+  const abortRef       = useRef(false);
+  const fileRef        = useRef<HTMLInputElement>(null);
+  const pendingRef     = useRef<Map<number, Partial<RowResult>>>(new Map());
+  const currentFileRef = useRef<File | null>(null);
+  // Set while a template is being applied so the columnNames auto-remap effect
+  // leaves the template's mappings verbatim for the reparse it triggers,
+  // instead of second-guessing the operator's saved choices.
+  const applyingTemplateRef = useRef(false);
+
+  // SOAP state
+  const [feedProtocol, setFeedProtocol] = useState<'rest' | 'soap'>('rest');
+  const [soapPath, setSoapPath]         = useState('/services/UbiManager');
+  const [soapMacro, setSoapMacro]       = useState('Assignment');
+  const [soapParamName, setSoapParamName] = useState('item');
+  const [soapXsiType, setSoapXsiType]   = useState('tns:Item');
+  const [soapReassign, setSoapReassign] = useState(true);
+  const [soapFieldPaths, setSoapFieldPaths] = useState<string[]>([]);
 
   // Conversion state
-  const [allEnvs]   = useState<Environment[]>(() => { try { return loadEnvironments(); } catch { return []; } });
+  const [allEnvs, setAllEnvs] = useState<Environment[]>([]);
   const [allTables] = useState<ConversionTable[]>(() => { try { return loadConversionTables(); } catch { return []; } });
+
+  useEffect(() => { loadAllEnvironments().then(setAllEnvs); }, []);
   const [useConversion, setUseConversion]   = useState(false);
   const [sourceEnvId, setSourceEnvId]       = useState('');
   const [selectedTableIds, setSelectedTableIds] = useState<string[]>([]);
@@ -214,12 +394,39 @@ export default function FeedPage() {
     [rows],
   );
 
+  const endpoint: Endpoint | undefined = useMemo(
+    () => postEndpoints.find(e => e.id === selectedId),
+    [selectedId]
+  );
+
+  const templateFields: { path: string; value: unknown }[] = useMemo(() => {
+    if (!endpoint?.body) return [];
+    try { return extractPathsWithValues(JSON.parse(endpoint.body)); } catch { return []; }
+  }, [endpoint]);
+
+  const templatePaths = useMemo(() => templateFields.map(f => f.path), [templateFields]);
+
+  const effectivePaths = useMemo(
+    () => feedProtocol === 'soap' ? soapFieldPaths : templatePaths,
+    [feedProtocol, soapFieldPaths, templatePaths],
+  );
+
+  const templateValues = useMemo(() => {
+    const map: Record<string, unknown> = {};
+    for (const { path, value } of templateFields) map[path] = value;
+    return map;
+  }, [templateFields]);
+
   const buildRaw = useCallback(
-    (row: Record<string, unknown>) =>
-      useMappingMode
-        ? rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns)
-        : rowToJson(row, fixedFields, trimColumns),
-    [useMappingMode, fieldMappings, fixedFields, trimColumns],
+    (row: Record<string, unknown>) => {
+      if (!useMappingMode && feedProtocol !== 'soap') return rowToJson(row, fixedFields, trimColumns);
+      const resolvedLookups: Record<string, LookupEntry[] | undefined> = {};
+      for (const [fieldPath, cfg] of Object.entries(fieldLookups)) {
+        resolvedLookups[fieldPath] = lookupCache[`${cfg.envId}:${cfg.entityType}`];
+      }
+      return rowToJsonMapped(row, fieldMappings, fixedFields, trimColumns, templateValues, resolvedLookups);
+    },
+    [useMappingMode, feedProtocol, fieldMappings, fixedFields, trimColumns, templateValues, fieldLookups, lookupCache],
   );
 
   const previewPayloads = useMemo(() =>
@@ -242,16 +449,6 @@ export default function FeedPage() {
     [rows, buildRaw],
   );
 
-  const endpoint: Endpoint | undefined = useMemo(
-    () => postEndpoints.find(e => e.id === selectedId),
-    [selectedId]
-  );
-
-  const templatePaths: string[] = useMemo(() => {
-    if (!endpoint?.body) return [];
-    try { return extractPaths(JSON.parse(endpoint.body)); } catch { return []; }
-  }, [endpoint]);
-
   // Group endpoints for the selector
   const grouped = useMemo(() => {
     const map: Record<string, Endpoint[]> = {};
@@ -263,66 +460,142 @@ export default function FeedPage() {
     return map;
   }, []);
 
-  const loadFile = useCallback(async (file: File) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, sheets?: string[], sep?: string, skip = 0) => {
+    currentFileRef.current = file;
     setParseError('');
     setRows([]);
     setResults([]);
     setDone(false);
     setFileName(file.name);
-    setTrimColumns(new Set());
+    // Don't reset trimColumns/fixedFields/mapping here — a template (or the
+    // operator's own choices) may already have set them as a base config, and
+    // toggling a parse option like "first row is header" re-parses the same
+    // file without meaning to discard that base.
     try {
-      const parsed = await parseFile(file);
+      const { rows: parsed, sheetNames: detected } = await parseFile(file, useHeader, sheets, sep, skip);
+      setSheetNames(detected);
+      if (!sheets) setSelectedSheets(detected);
       if (!parsed.length) { setParseError('No data rows found in the file.'); return; }
       setRows(parsed);
     } catch (err: unknown) {
       setParseError(err instanceof Error ? err.message : 'Failed to parse file');
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (f) loadFile(f);
+    const f = e.target.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep, skipRows);
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
-    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f);
+    const f = e.dataTransfer.files?.[0]; if (f) loadFile(f, hasHeader, undefined, csvSep, skipRows);
+  };
+
+  const toggleSheet = (name: string) => {
+    const next = selectedSheets.includes(name)
+      ? selectedSheets.filter(s => s !== name)
+      : [...selectedSheets, name];
+    setSelectedSheets(next);
+    if (currentFileRef.current && next.length > 0) loadFile(currentFileRef.current, hasHeader, next, csvSep, skipRows);
+  };
+
+  const selectAllSheets = () => {
+    setSelectedSheets(sheetNames);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, sheetNames, csvSep, skipRows);
   };
 
   const updateFixed = (i: number, field: 'key' | 'value', val: string) =>
     setFixedFields(prev => prev.map((ff, idx) => idx === i ? { ...ff, [field]: val } : ff));
 
   const addFixed = () => setFixedFields(prev => [...prev, { key: '', value: '' }]);
-  const removeFixed = (i: number) => setFixedFields(prev => prev.filter((_, idx) => idx !== i));
+  const removeFixed = (i: number) => {
+    setFixedFields(prev => prev.filter((_, idx) => idx !== i));
+    setFixedPickerIdx(prev => prev === i ? null : prev);
+  };
+
+  const setFixedLookup = (i: number, cfg: { entityType: string; envId: string } | null) =>
+    setFixedFields(prev => prev.map((ff, idx) => {
+      if (idx !== i) return ff;
+      if (!cfg) { const next = { ...ff }; delete next.lookup; return next; }
+      return { ...ff, lookup: cfg };
+    }));
 
   const toggleTrimColumn = (col: string) =>
     setTrimColumns(prev => { const next = new Set(prev); if (next.has(col)) next.delete(col); else next.add(col); return next; });
+
+  const loadLookupEntities = useCallback(async (envId: string, entityType: string) => {
+    if (!envId || !entityType) return;
+    const key = `${envId}:${entityType}`;
+    if (lookupCache[key] || lookupLoading.has(key)) return;
+    setLookupLoading(prev => new Set([...prev, key]));
+    try {
+      const env = allEnvs.find(e => e.id === envId);
+      if (!env) return;
+      const raw = await proxyGet(env, `/api/entities/${entityType}`);
+      const data = (raw as Record<string, unknown>[])
+        .map(o => ({ id: o.id, name: String(o.name ?? o.id ?? '') }))
+        .filter(o => o.id !== undefined && o.id !== null && o.id !== '');
+      setLookupCache(prev => ({ ...prev, [key]: data }));
+    } catch { /* silently ignore — preview will show null */ }
+    finally { setLookupLoading(prev => { const next = new Set(prev); next.delete(key); return next; }); }
+  }, [lookupCache, lookupLoading, allEnvs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setFieldLookup = (path: string, cfg: { entityType: string; envId: string } | null) => {
+    setFieldLookups(prev => {
+      const next = { ...prev };
+      if (cfg) { next[path] = cfg; loadLookupEntities(cfg.envId, cfg.entityType); }
+      else delete next[path];
+      return next;
+    });
+  };
+
+  const toggleFixedPicker = (i: number) => {
+    setFixedPickerSearch('');
+    setFixedPickerIdx(prev => {
+      if (prev === i) return null;
+      const cfg = fixedFields[i]?.lookup ?? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' };
+      setFixedLookup(i, cfg);
+      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+      return i;
+    });
+  };
 
   const handleToggleMappingMode = (enabled: boolean) => {
     setUseMappingMode(enabled);
     if (enabled) {
       const init: Record<string, string> = {};
-      for (const path of templatePaths) {
+      for (const path of effectivePaths) {
         const basename = path.split('.').pop() ?? path;
         const match = columnNames.find(c =>
           c === path || c === basename ||
           c.toLowerCase() === path.toLowerCase() ||
           c.toLowerCase() === basename.toLowerCase()
         );
-        init[path] = match ?? '';
+        const hasTemplateVal = templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '';
+        init[path] = match ?? (hasTemplateVal ? '__template' : '');
       }
       setFieldMappings(init);
     } else {
       setFieldMappings({});
+      setFieldLookups({});
     }
   };
+
+  // If user loses SOAP access (permission change), reset protocol to REST.
+  useEffect(() => {
+    if (!canUseSoap && feedProtocol === 'soap') setFeedProtocol('rest');
+  }, [canUseSoap, feedProtocol]);
 
   // When a new file is loaded (columnNames changes) while mapping mode is on,
   // preserve existing valid mappings and try to re-match the rest.
   useEffect(() => {
-    if (!useMappingMode || templatePaths.length === 0 || columnNames.length === 0) return;
+    if (!useMappingMode || effectivePaths.length === 0 || columnNames.length === 0) return;
+    // A template application just set the mappings deliberately — don't auto-remap
+    // over them. Consume the flag so the next genuine file load re-matches normally.
+    if (applyingTemplateRef.current) { applyingTemplateRef.current = false; return; }
     setFieldMappings(prev => {
       const next: Record<string, string> = {};
-      for (const path of templatePaths) {
+      for (const path of effectivePaths) {
         const prevSrc = prev[path] ?? '';
         if (prevSrc === '__null') { next[path] = '__null'; continue; }
         if (prevSrc && columnNames.includes(prevSrc)) { next[path] = prevSrc; continue; }
@@ -332,7 +605,8 @@ export default function FeedPage() {
           c.toLowerCase() === path.toLowerCase() ||
           c.toLowerCase() === basename.toLowerCase()
         );
-        next[path] = match ?? '';
+        const hasTemplateVal = templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '';
+        next[path] = match ?? (hasTemplateVal ? '__template' : '');
       }
       return next;
     });
@@ -344,12 +618,81 @@ export default function FeedPage() {
     setTrimColumns(new Set());
     setUseMappingMode(false);
     setFieldMappings({});
+    setFieldLookups({});
+    setSheetNames([]); setSelectedSheets([]);
+    setSkipRows(0);
+    setFixedPickerIdx(null);
+    currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
+    // Don't reset soapFieldPaths — user keeps their field list when re-uploading a file
+  };
+
+  const confirmSaveTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    const tpl: FeedTemplate = {
+      id: genId(),
+      name,
+      endpointId: selectedId,
+      hasHeader,
+      trimColumns: [...trimColumns],
+      useMappingMode,
+      fieldMappings: { ...fieldMappings },
+      fixedFields: fixedFields.map(f => ({ ...f })),
+      fieldLookups: { ...fieldLookups },
+      ...(feedProtocol === 'soap' ? {
+        soapMode: true, soapPath, soapMacro, soapParamName, soapXsiType, soapReassign,
+        soapFieldPaths: [...soapFieldPaths],
+      } : {}),
+    };
+    const next = [...templates, tpl];
+    setTemplates(next);
+    saveFeedTemplates(next);
+    setTemplateName('');
+    setSavingTemplate(false);
+  };
+
+  const applyTemplate = (tpl: FeedTemplate) => {
+    // Only guard the auto-remap when this template actually carries mappings to
+    // protect; otherwise a mapping-less template would leave the flag set and
+    // suppress auto-matching on the next unrelated file load.
+    applyingTemplateRef.current = tpl.useMappingMode || !!tpl.soapMode;
+    setSelectedId(tpl.endpointId);
+    setHasHeader(tpl.hasHeader);
+    setTrimColumns(new Set(tpl.trimColumns));
+    setUseMappingMode(tpl.useMappingMode);
+    setFieldMappings({ ...tpl.fieldMappings });
+    setFixedFields(tpl.fixedFields.map(f => ({ ...f })));
+    for (const f of tpl.fixedFields) if (f.lookup) loadLookupEntities(f.lookup.envId, f.lookup.entityType);
+    const lookups = tpl.fieldLookups ?? {};
+    setFieldLookups(lookups);
+    for (const cfg of Object.values(lookups)) loadLookupEntities(cfg.envId, cfg.entityType);
+    if (tpl.soapMode) {
+      setFeedProtocol('soap');
+      if (tpl.soapPath !== undefined) setSoapPath(tpl.soapPath);
+      if (tpl.soapMacro !== undefined) setSoapMacro(tpl.soapMacro);
+      if (tpl.soapParamName !== undefined) setSoapParamName(tpl.soapParamName);
+      if (tpl.soapXsiType !== undefined) setSoapXsiType(tpl.soapXsiType);
+      if (tpl.soapReassign !== undefined) setSoapReassign(tpl.soapReassign);
+      if (tpl.soapFieldPaths) setSoapFieldPaths([...tpl.soapFieldPaths]);
+    } else {
+      setFeedProtocol('rest');
+      setSoapFieldPaths([]);
+    }
+    if (currentFileRef.current) {
+      loadFile(currentFileRef.current, tpl.hasHeader, selectedSheets.length ? selectedSheets : undefined, csvSep, skipRows);
+    }
+  };
+
+  const deleteTemplate = (id: string) => {
+    const next = templates.filter(t => t.id !== id);
+    setTemplates(next);
+    saveFeedTemplates(next);
   };
 
   const retryFailed = async () => {
     const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
-    if (failedIndices.length === 0 || !endpoint) return;
+    if (failedIndices.length === 0 || (feedProtocol === 'rest' && !endpoint)) return;
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
 
     abortRef.current = false;
@@ -358,8 +701,12 @@ export default function FeedPage() {
     setExpandedIdx(null);
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
-    const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    const url = feedProtocol === 'soap'
+      ? `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`
+      : endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl));
+    const headers: Record<string, string> = feedProtocol === 'soap'
+      ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
+      : { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
@@ -388,10 +735,16 @@ export default function FeedPage() {
           if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join(' | '), payload: finalJson }); continue; }
           const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
           const t0 = Date.now();
+          const bodyStr = feedProtocol === 'soap'
+            ? buildFeedSoapEnvelope(finalJson, soapMacro, soapParamName, soapXsiType, soapReassign)
+            : JSON.stringify(finalJson);
+          const proxyReq = feedProtocol === 'soap'
+            ? { url, method: 'POST', headers, body: bodyStr }
+            : { url, method: 'POST', headers, body: bodyStr, endpointId: selectedId };
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
+            body: JSON.stringify(proxyReq),
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -403,14 +756,26 @@ export default function FeedPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
-            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            if (feedProtocol === 'soap') {
+              const fault = parseFeedSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload: finalJson, responseBody: data.body, elapsed });
+              } else {
+                const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+                update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+              }
+            } else {
+              const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+              update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
+            const msg = feedProtocol === 'soap'
+              ? (parseFeedSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload: finalJson, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
@@ -427,13 +792,18 @@ export default function FeedPage() {
 
   const runFeed = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
-    if (!endpoint || rows.length === 0) return;
+    if ((feedProtocol === 'rest' && !endpoint) || rows.length === 0) return;
 
     setShowPreview(false);
     abortRef.current = false;
     setRunning(true);
     setDone(false);
     setExpandedIdx(null);
+
+    const sessionStart = new Date().toISOString();
+    const batchT0 = Date.now();
+    const finalStatus: string[] = new Array(rows.length).fill('pending');
+    const elapsedTimes: number[] = [];
 
     const initial: RowResult[] = rows.map((row, i) => ({
       index: i,
@@ -442,14 +812,20 @@ export default function FeedPage() {
     }));
     setResults(initial);
 
-    const url = endpoint.url.replace('{{baseURL}}', config.baseUrl.replace(/\/$/, ''));
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    const url = feedProtocol === 'soap'
+      ? `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`
+      : endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl));
+    const headers: Record<string, string> = feedProtocol === 'soap'
+      ? { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' }
+      : { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
     const update = (i: number, patch: Partial<RowResult>) => {
       const prev = pendingRef.current.get(i) ?? {};
       pendingRef.current.set(i, { ...prev, ...patch });
+      if (patch.status) finalStatus[i] = patch.status;
+      if (patch.elapsed != null) elapsedTimes.push(patch.elapsed);
     };
     const flush = () => {
       if (pendingRef.current.size === 0) return;
@@ -479,10 +855,16 @@ export default function FeedPage() {
           const substitutionNotes = convNotes.filter(n => n.includes('default') || n.includes('kept-source')).join('; ');
 
           const t0 = Date.now();
+          const bodyStr = feedProtocol === 'soap'
+            ? buildFeedSoapEnvelope(finalJson, soapMacro, soapParamName, soapXsiType, soapReassign)
+            : JSON.stringify(finalJson);
+          const proxyReq = feedProtocol === 'soap'
+            ? { url, method: 'POST', headers, body: bodyStr }
+            : { url, method: 'POST', headers, body: bodyStr, endpointId: selectedId };
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers, body: JSON.stringify(finalJson), endpointId: selectedId }),
+            body: JSON.stringify(proxyReq),
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -494,14 +876,26 @@ export default function FeedPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload: finalJson, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
-            update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            if (feedProtocol === 'soap') {
+              const fault = parseFeedSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload: finalJson, responseBody: data.body, elapsed });
+              } else {
+                const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+                update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+              }
+            } else {
+              const status: RowStatus = substitutionNotes ? 'ok-substituted' : 'ok';
+              update(idx, { status, httpStatus: data.status, notes: substitutionNotes || undefined, payload: finalJson, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload: finalJson, responseBody: body, elapsed });
+            const msg = feedProtocol === 'soap'
+              ? (parseFeedSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload: finalJson, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Error' });
@@ -514,6 +908,41 @@ export default function FeedPage() {
     flush();
     setRunning(false);
     setDone(true);
+
+    const ok = finalStatus.filter(s => s === 'ok' || s === 'ok-substituted').length;
+    const errors = finalStatus.filter(s => s === 'error').length;
+    const skipped = finalStatus.filter(s => s === 'pending').length;
+    const avgElapsedMs = elapsedTimes.length > 0
+      ? Math.round(elapsedTimes.reduce((a, b) => a + b, 0) / elapsedTimes.length)
+      : null;
+    const envEntry = allEnvs.find(e => normalizeBaseUrl(e.baseUrl) === normalizeBaseUrl(config.baseUrl ?? ''));
+    const operationLabel = feedProtocol === 'soap'
+      ? `SOAP ${soapMacro || 'executeMacro'}`
+      : endpoint ? `${endpoint.method} ${endpoint.name}` : 'unknown';
+    await postHistory({
+      username: user?.username ?? '',
+      environment: normalizeBaseUrl(config.baseUrl ?? ''),
+      environmentName: envEntry?.name ?? normalizeBaseUrl(config.baseUrl ?? ''),
+      protocol: feedProtocol,
+      operation: operationLabel,
+      sourceFile: fileName,
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: rows.length,
+      totalOk: ok,
+      totalErrors: errors,
+      totalSkipped: skipped,
+      batches: [{
+        batchNum: 1,
+        startedAt: sessionStart,
+        durationMs: Date.now() - batchT0,
+        total: rows.length,
+        ok,
+        errors,
+        skipped,
+        avgElapsedMs,
+      }],
+    });
   };
 
   const counts = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] ?? 0) + 1; return acc; }, {} as Record<RowStatus, number>);
@@ -541,30 +970,174 @@ export default function FeedPage() {
 
       <div className="max-w-6xl mx-auto px-5 py-8 space-y-6">
 
+        {/* Templates bar */}
+        {(templates.length > 0 || selectedId) && (
+          <div className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide shrink-0">Templates</span>
+            <div className="flex flex-wrap gap-2 flex-1">
+              {templates.map(tpl => (
+                <div key={tpl.id} className="flex items-center">
+                  <button
+                    onClick={() => applyTemplate(tpl)}
+                    title={`Load template: ${tpl.name}`}
+                    className="text-xs px-2.5 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded-l transition-colors"
+                  >
+                    {tpl.name}
+                  </button>
+                  <button
+                    onClick={() => deleteTemplate(tpl.id)}
+                    title="Delete template"
+                    className="text-xs px-1.5 py-1 bg-slate-700 hover:bg-red-900/40 text-slate-500 hover:text-red-400 rounded-r border-l border-slate-600 transition-colors"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            {savingTemplate ? (
+              <div className="flex items-center gap-2">
+                <input
+                  autoFocus
+                  type="text"
+                  value={templateName}
+                  onChange={e => setTemplateName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') confirmSaveTemplate();
+                    if (e.key === 'Escape') { setSavingTemplate(false); setTemplateName(''); }
+                  }}
+                  placeholder="Template name…"
+                  className="text-xs bg-slate-900 border border-slate-600 text-white rounded px-2 py-1 focus:outline-none focus:border-blue-500 w-40"
+                />
+                <button onClick={confirmSaveTemplate} className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors">Save</button>
+                <button onClick={() => { setSavingTemplate(false); setTemplateName(''); }} className="text-xs text-slate-500 hover:text-slate-400 transition-colors">Cancel</button>
+              </div>
+            ) : (
+              (selectedId || feedProtocol === 'soap') && (
+                <button onClick={() => setSavingTemplate(true)} className="text-xs text-blue-400 hover:text-blue-300 transition-colors shrink-0">
+                  + Save as template
+                </button>
+              )
+            )}
+          </div>
+        )}
+
         {/* Step 1 — Endpoint */}
         <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
           <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
             <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">1</span>
             Select target endpoint
           </h2>
-          <select
-            value={selectedId}
-            onChange={e => { setSelectedId(e.target.value); reset(); }}
-            className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500"
-          >
-            <option value="">— choose a POST endpoint —</option>
-            {Object.entries(grouped).map(([group, eps]) => (
-              <optgroup key={group} label={group}>
-                {eps.map(ep => (
-                  <option key={ep.id} value={ep.id}>
-                    {ep.name} — {ep.url.replace('{{baseURL}}', '')}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
 
-          {endpoint && (
+          {/* Protocol toggle */}
+          <div className="flex items-center gap-4 mb-3 flex-wrap">
+            <span className="text-xs text-slate-400">Protocol</span>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input type="radio" name="feed-protocol" value="rest" checked={feedProtocol === 'rest'} onChange={() => setFeedProtocol('rest')} className="accent-blue-500" />
+              <span className="text-sm text-slate-300">REST</span>
+            </label>
+            {canUseSoap && (
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input type="radio" name="feed-protocol" value="soap" checked={feedProtocol === 'soap'} onChange={() => { setFeedProtocol('soap'); setSelectedId(''); }} className="accent-blue-500" />
+                <span className="text-sm text-slate-300">SOAP</span>
+              </label>
+            )}
+          </div>
+
+          {feedProtocol === 'rest' && (
+            <select
+              value={selectedId}
+              onChange={e => { setSelectedId(e.target.value); reset(); }}
+              className="w-full bg-slate-900 border border-slate-600 text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-blue-500"
+            >
+              <option value="">— choose a POST endpoint —</option>
+              {Object.entries(grouped).map(([group, eps]) => (
+                <optgroup key={group} label={group}>
+                  {eps.map(ep => (
+                    <option key={ep.id} value={ep.id}>
+                      {ep.name} — {ep.url.replace('{{baseURL}}', '')}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
+
+          {feedProtocol === 'soap' && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Path</label>
+                  <input
+                    type="text"
+                    value={soapPath}
+                    onChange={e => setSoapPath(e.target.value)}
+                    placeholder="/ws"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-28 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400 shrink-0">Macro</label>
+                  <input
+                    type="text"
+                    value={soapMacro}
+                    onChange={e => setSoapMacro(e.target.value)}
+                    placeholder="Assignment"
+                    className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 w-36 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={soapReassign} onChange={e => setSoapReassign(e.target.checked)} className="accent-violet-500 w-4 h-4" />
+                  <span className="text-sm text-slate-300">Reassign</span>
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-4 items-center">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500 shrink-0">Param name</label>
+                  <input
+                    type="text"
+                    value={soapParamName}
+                    onChange={e => setSoapParamName(e.target.value)}
+                    placeholder="item"
+                    className="bg-slate-900 border border-slate-600 text-slate-400 text-xs font-mono rounded px-2 py-1.5 w-24 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500 shrink-0">XSI type</label>
+                  <input
+                    type="text"
+                    value={soapXsiType}
+                    onChange={e => setSoapXsiType(e.target.value)}
+                    placeholder="tns:Item"
+                    className="bg-slate-900 border border-slate-600 text-slate-400 text-xs font-mono rounded px-2 py-1.5 w-28 focus:outline-none focus:border-violet-500"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-slate-500">Presets:</span>
+                {Object.entries(SOAP_PRESETS).map(([name, preset]) => (
+                  <button
+                    key={name}
+                    onClick={() => {
+                      setSoapMacro(preset.macro);
+                      setSoapPath(preset.path);
+                      setSoapParamName(preset.paramName);
+                      setSoapXsiType(preset.xsiType);
+                      setSoapFieldPaths([...preset.fieldPaths]);
+                      if (!useMappingMode) handleToggleMappingMode(true);
+                    }}
+                    className="text-xs px-2.5 py-1 rounded border border-violet-700 text-violet-300 hover:bg-violet-900/40 transition-colors"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+              <p className="font-mono text-xs text-violet-300 bg-slate-900 rounded px-3 py-2 break-all">
+                POST {normalizeBaseUrl(config.baseUrl || '') || '<baseURL>'}{soapPath || '/services/UbiManager'} → executeMacro({soapMacro || 'Assignment'})
+              </p>
+            </div>
+          )}
+
+          {endpoint && feedProtocol === 'rest' && (
             <div className="mt-4 grid grid-cols-2 gap-4">
               {/* URL */}
               <div>
@@ -589,7 +1162,7 @@ export default function FeedPage() {
           )}
         </div>
 
-        {endpoint && (
+        {(endpoint || feedProtocol === 'soap') && (
           <>
             {/* Step 2 — File */}
             <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
@@ -597,6 +1170,50 @@ export default function FeedPage() {
                 <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">2</span>
                 Upload CSV or Excel file
               </h2>
+
+              {/* Parse options */}
+              <div className="flex items-center gap-4 mb-3">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={hasHeader}
+                    onChange={e => {
+                      const next = e.target.checked;
+                      setHasHeader(next);
+                      if (currentFileRef.current) loadFile(currentFileRef.current, next, selectedSheets.length ? selectedSheets : undefined, csvSep, skipRows);
+                    }}
+                    className="accent-blue-500 w-4 h-4"
+                  />
+                  <span className="text-sm text-slate-300">First row is header</span>
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500">CSV sep:</span>
+                  {(['auto', ',', ';', '|'] as const).map(s => (
+                    <button key={s} onClick={() => { setCsvSep(s); if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, s, skipRows); }}
+                      className={`text-xs px-2 py-0.5 rounded font-mono border transition-colors ${csvSep === s ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                <label className="flex items-center gap-1.5">
+                  <span className="text-xs text-slate-500">Skip first</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={skipRows}
+                    onChange={e => {
+                      const next = Math.max(0, Number(e.target.value) || 0);
+                      setSkipRows(next);
+                      if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, selectedSheets.length ? selectedSheets : undefined, csvSep, next);
+                    }}
+                    className="w-14 bg-slate-900 border border-slate-600 text-white text-xs rounded px-1.5 py-0.5 focus:outline-none focus:border-blue-500"
+                  />
+                  <span className="text-xs text-slate-500">row{skipRows === 1 ? '' : 's'}</span>
+                </label>
+                {!hasHeader && (
+                  <span className="text-xs text-slate-500">Columns will be named Column 1, Column 2, … — assign them in the mapping step below</span>
+                )}
+              </div>
 
               <div
                 onDragOver={e => { e.preventDefault(); setDragging(true); }}
@@ -633,6 +1250,36 @@ export default function FeedPage() {
                 )}
                 {parseError && <p className="text-red-400 text-sm mt-3">{parseError}</p>}
               </div>
+
+              {/* Sheet selector — only for multi-sheet workbooks */}
+              {sheetNames.length > 1 && (
+                <div className="mt-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <p className="text-xs text-slate-400">Sheets to import:</p>
+                    {selectedSheets.length < sheetNames.length && (
+                      <button onClick={selectAllSheets} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">select all</button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {sheetNames.map(name => {
+                      const active = selectedSheets.includes(name);
+                      return (
+                        <button
+                          key={name}
+                          onClick={() => toggleSheet(name)}
+                          className={`text-xs px-2 py-1 rounded font-mono transition-colors ${
+                            active
+                              ? 'bg-blue-900/30 border border-blue-600 text-blue-300'
+                              : 'bg-slate-900 border border-slate-700 text-slate-500 hover:border-slate-500'
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Column names + strip-spaces toggles */}
               {rows.length > 0 && (
@@ -671,52 +1318,162 @@ export default function FeedPage() {
             </div>
 
             {/* Step 3 — Column mapping */}
-            {rows.length > 0 && templatePaths.length > 0 && (
+            {rows.length > 0 && (effectivePaths.length > 0 || feedProtocol === 'soap') && (
               <div className="bg-slate-800 border border-slate-700 rounded-lg p-5">
                 <h2 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
                   <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold shrink-0">3</span>
                   Column mapping
-                  <span className="text-slate-500 font-normal text-xs ml-1">— link template fields to file columns explicitly</span>
+                  <span className="text-slate-500 font-normal text-xs ml-1">— link {feedProtocol === 'soap' ? 'SOAP item fields' : 'template fields'} to file columns</span>
                 </h2>
 
-                <label className="flex items-center gap-2 cursor-pointer mb-4">
-                  <input
-                    type="checkbox"
-                    checked={useMappingMode}
-                    onChange={e => handleToggleMappingMode(e.target.checked)}
-                    className="accent-blue-500 w-4 h-4"
-                  />
-                  <span className="text-sm text-slate-300">Use column mapping</span>
-                </label>
+                {/* SOAP mode: user-defined field paths */}
+                {feedProtocol === 'soap' && (
+                  <div className="mb-4">
+                    <p className="text-xs text-slate-500 mb-2">Define the SOAP item fields to populate from file columns:</p>
+                    <div className="space-y-1.5">
+                      {soapFieldPaths.map((path, i) => (
+                        <div key={i} className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={path}
+                            onChange={e => {
+                              const oldPath = soapFieldPaths[i];
+                              const newPath = e.target.value;
+                              setSoapFieldPaths(prev => { const n = [...prev]; n[i] = newPath; return n; });
+                              if (oldPath && oldPath !== newPath) {
+                                setFieldMappings(prev => {
+                                  const m = { ...prev };
+                                  if (oldPath in m) { m[newPath] = m[oldPath]; delete m[oldPath]; }
+                                  return m;
+                                });
+                              }
+                            }}
+                            placeholder="e.g. id  or  category.id"
+                            className="flex-1 bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1.5 focus:outline-none focus:border-violet-500 placeholder:text-slate-600"
+                          />
+                          <button
+                            onClick={() => {
+                              setSoapFieldPaths(prev => prev.filter((_, idx) => idx !== i));
+                              setFieldMappings(prev => { const m = { ...prev }; delete m[path]; return m; });
+                              setFieldLookup(path, null);
+                            }}
+                            className="text-slate-500 hover:text-red-400 transition-colors px-1"
+                          >×</button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setSoapFieldPaths(prev => [...prev, '']);
+                        if (!useMappingMode) handleToggleMappingMode(true);
+                      }}
+                      className="mt-2 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                    >
+                      + Add field
+                    </button>
+                  </div>
+                )}
 
-                {useMappingMode && (
+                {feedProtocol === 'rest' && (
+                  <label className="flex items-center gap-2 cursor-pointer mb-4">
+                    <input
+                      type="checkbox"
+                      checked={useMappingMode}
+                      onChange={e => handleToggleMappingMode(e.target.checked)}
+                      className="accent-blue-500 w-4 h-4"
+                    />
+                    <span className="text-sm text-slate-300">Use column mapping</span>
+                  </label>
+                )}
+
+                {(useMappingMode || feedProtocol === 'soap') && effectivePaths.length > 0 && (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs border-collapse">
                       <thead>
                         <tr className="border-b border-slate-700">
-                          <th className="text-left py-2 pr-6 text-slate-400 font-medium">Template field</th>
+                          <th className="text-left py-2 pr-6 text-slate-400 font-medium">{feedProtocol === 'soap' ? 'SOAP field' : 'Template field'}</th>
                           <th className="text-left py-2 text-slate-400 font-medium">Source column</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {templatePaths.map(path => (
-                          <tr key={path} className="border-b border-slate-700/40">
-                            <td className="py-2 pr-6 font-mono text-slate-300 whitespace-nowrap">{path}</td>
-                            <td className="py-2 w-full">
-                              <select
-                                value={fieldMappings[path] ?? ''}
-                                onChange={e => setFieldMappings(prev => ({ ...prev, [path]: e.target.value }))}
-                                className="w-full bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
-                              >
-                                <option value="">— ignore —</option>
-                                <option value="__null">null</option>
-                                {columnNames.map((col, i) => (
-                                  <option key={col} value={col}>#{i + 1} · {col}</option>
-                                ))}
-                              </select>
-                            </td>
-                          </tr>
-                        ))}
+                        {effectivePaths.map(path => {
+                          const src = fieldMappings[path] ?? '';
+                          const isColumn = src && src !== '__null' && src !== '__template';
+                          const lookup = fieldLookups[path] ?? null;
+                          const cacheKey = lookup ? `${lookup.envId}:${lookup.entityType}` : '';
+                          const cacheEntries = cacheKey ? lookupCache[cacheKey] : undefined;
+                          const isLoadingLookup = cacheKey ? lookupLoading.has(cacheKey) : false;
+                          return (
+                            <tr key={path} className="border-b border-slate-700/40">
+                              <td className="py-2 pr-6 font-mono text-slate-300 whitespace-nowrap align-top pt-3">{path}</td>
+                              <td className="py-2 w-full">
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={src}
+                                    onChange={e => {
+                                      setFieldMappings(prev => ({ ...prev, [path]: e.target.value }));
+                                      if (!e.target.value || e.target.value === '__null' || e.target.value === '__template') {
+                                        setFieldLookup(path, null);
+                                      }
+                                    }}
+                                    className="flex-1 bg-slate-900 border border-slate-600 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                                  >
+                                    <option value="">— ignore —</option>
+                                    <option value="__null">null</option>
+                                    {feedProtocol === 'rest' && templateValues[path] !== null && templateValues[path] !== undefined && templateValues[path] !== '' && (
+                                      <option value="__template">← keep: {String(templateValues[path])}</option>
+                                    )}
+                                    {columnNames.map((col, i) => (
+                                      <option key={col} value={col}>#{i + 1} · {col}</option>
+                                    ))}
+                                  </select>
+                                  <label
+                                    className={`flex items-center gap-1 shrink-0 ${isColumn ? 'cursor-pointer' : 'opacity-30 cursor-not-allowed'}`}
+                                    title="Match column text to object name and use its ID"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={!!lookup}
+                                      disabled={!isColumn}
+                                      onChange={e => setFieldLookup(path, e.target.checked
+                                        ? { entityType: ENTITY_TYPES[0], envId: allEnvs[0]?.id ?? '' }
+                                        : null
+                                      )}
+                                      className="accent-violet-500 w-3.5 h-3.5"
+                                    />
+                                    <span className="text-slate-400 text-[11px]">→ ID</span>
+                                  </label>
+                                </div>
+                                {lookup && (
+                                  <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                                    <select
+                                      value={lookup.entityType}
+                                      onChange={e => setFieldLookup(path, { ...lookup, entityType: e.target.value })}
+                                      className="bg-slate-900 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                    >
+                                      {ENTITY_TYPES.map(et => <option key={et} value={et}>{et}</option>)}
+                                    </select>
+                                    <span className="text-slate-600 text-[11px]">from</span>
+                                    <select
+                                      value={lookup.envId}
+                                      onChange={e => setFieldLookup(path, { ...lookup, envId: e.target.value })}
+                                      className="bg-slate-900 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                    >
+                                      {allEnvs.length === 0
+                                        ? <option value="">— no environments —</option>
+                                        : allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)
+                                      }
+                                    </select>
+                                    {isLoadingLookup && <span className="text-slate-500 text-[11px]">loading…</span>}
+                                    {cacheEntries && !isLoadingLookup && (
+                                      <span className="text-violet-400 text-[11px]">{cacheEntries.length} entries</span>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -737,32 +1494,147 @@ export default function FeedPage() {
                   {/* Fixed fields */}
                   <div>
                     <div className="space-y-2 mb-2">
-                      {fixedFields.map((ff, i) => (
-                        <div key={i} className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={ff.key}
-                            onChange={e => updateFixed(i, 'key', e.target.value)}
-                            placeholder="field.path"
-                            className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
-                          />
-                          <span className="text-slate-600 text-xs">=</span>
-                          <input
-                            type="text"
-                            value={ff.value}
-                            onChange={e => updateFixed(i, 'value', e.target.value)}
-                            placeholder="value"
-                            className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
-                          />
-                          <button onClick={() => removeFixed(i)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
-                        </div>
-                      ))}
+                      {fixedFields.map((ff, i) => {
+                        const lookup = ff.lookup ?? null;
+                        const cacheKey = lookup ? `${lookup.envId}:${lookup.entityType}` : '';
+                        const cacheEntries = cacheKey ? lookupCache[cacheKey] : undefined;
+                        const isLoadingLookup = cacheKey ? lookupLoading.has(cacheKey) : false;
+                        const resolvedName = lookup && cacheEntries
+                          ? cacheEntries.find(e => String(e.id) === ff.value.trim())?.name
+                          : undefined;
+                        const pickerOpen = fixedPickerIdx === i;
+                        const filteredEntries = (cacheEntries ?? [])
+                          .filter(e => !fixedPickerSearch.trim() || e.name.toLowerCase().includes(fixedPickerSearch.trim().toLowerCase()));
+                        return (
+                          <div key={i} className="space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={ff.key}
+                                onChange={e => updateFixed(i, 'key', e.target.value)}
+                                placeholder="field or field.subfield"
+                                className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                              />
+                              <span className="text-slate-600 text-xs">=</span>
+                              {ff.value === '__now' ? (
+                                <div className="flex-1 flex items-center gap-1">
+                                  <span className="flex-1 bg-slate-900 border border-violet-700 text-violet-300 text-xs rounded px-2 py-1.5 font-mono">
+                                    current datetime
+                                  </span>
+                                  <button
+                                    onClick={() => updateFixed(i, 'value', '')}
+                                    className="text-slate-600 hover:text-slate-400 text-xs px-1"
+                                    title="Clear"
+                                  >×</button>
+                                </div>
+                              ) : (
+                                <>
+                                  <input
+                                    type="text"
+                                    value={ff.value}
+                                    onChange={e => updateFixed(i, 'value', e.target.value)}
+                                    placeholder='value or {"id":123}'
+                                    className="flex-1 bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 font-mono focus:outline-none focus:border-blue-500 placeholder:text-slate-600"
+                                  />
+                                  <button
+                                    onClick={() => toggleFixedPicker(i)}
+                                    title="Browse objects and pick an ID by name"
+                                    className={`transition-colors shrink-0 text-xs px-1 ${pickerOpen ? 'text-violet-400' : 'text-slate-500 hover:text-violet-400'}`}
+                                  >
+                                    🔎
+                                  </button>
+                                  <button
+                                    onClick={() => updateFixed(i, 'value', '__now')}
+                                    title="Use current datetime"
+                                    className="text-slate-500 hover:text-violet-400 transition-colors shrink-0 text-xs px-1"
+                                  >
+                                    ⏱
+                                  </button>
+                                </>
+                              )}
+                              <button onClick={() => removeFixed(i)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+
+                            {lookup && !pickerOpen && ff.value.trim() && (
+                              resolvedName
+                                ? <p className="text-xs text-emerald-400 pl-1">✓ {resolvedName}</p>
+                                : !isLoadingLookup && cacheEntries && <p className="text-xs text-amber-500 pl-1">No {lookup.entityType} found with id {ff.value.trim()}</p>
+                            )}
+
+                            {pickerOpen && (
+                              <div className="bg-slate-900 border border-violet-700/50 rounded-lg p-3 space-y-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <select
+                                    value={lookup?.entityType ?? ENTITY_TYPES[0]}
+                                    onChange={e => {
+                                      const cfg = { entityType: e.target.value, envId: lookup?.envId ?? allEnvs[0]?.id ?? '' };
+                                      setFixedLookup(i, cfg);
+                                      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+                                    }}
+                                    className="bg-slate-800 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                  >
+                                    {ENTITY_TYPES.map(et => <option key={et} value={et}>{et}</option>)}
+                                  </select>
+                                  <span className="text-slate-600 text-[11px]">from</span>
+                                  <select
+                                    value={lookup?.envId ?? ''}
+                                    onChange={e => {
+                                      const cfg = { entityType: lookup?.entityType ?? ENTITY_TYPES[0], envId: e.target.value };
+                                      setFixedLookup(i, cfg);
+                                      if (cfg.envId) loadLookupEntities(cfg.envId, cfg.entityType);
+                                    }}
+                                    className="bg-slate-800 border border-violet-700 text-violet-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-violet-500"
+                                  >
+                                    {allEnvs.length === 0
+                                      ? <option value="">— no environments —</option>
+                                      : allEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)
+                                    }
+                                  </select>
+                                  <button onClick={() => setFixedPickerIdx(null)} className="ml-auto text-slate-500 hover:text-white text-xs px-1">✕</button>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={fixedPickerSearch}
+                                  onChange={e => setFixedPickerSearch(e.target.value)}
+                                  placeholder="Search by name…"
+                                  autoFocus
+                                  className="w-full bg-slate-800 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-violet-500 placeholder:text-slate-600"
+                                />
+                                {isLoadingLookup && <p className="text-xs text-slate-500">Loading…</p>}
+                                {!isLoadingLookup && cacheEntries && (
+                                  <div className="max-h-40 overflow-y-auto space-y-0.5">
+                                    {filteredEntries.length === 0 && (
+                                      <p className="text-xs text-slate-600 py-1">No match.</p>
+                                    )}
+                                    {filteredEntries.slice(0, 50).map(e => (
+                                      <button
+                                        key={String(e.id)}
+                                        onClick={() => { updateFixed(i, 'value', String(e.id)); setFixedPickerIdx(null); }}
+                                        className="w-full flex items-center gap-2 text-left px-2 py-1 rounded hover:bg-violet-900/30 transition-colors"
+                                      >
+                                        <span className="text-violet-400 text-xs font-mono shrink-0">#{String(e.id)}</span>
+                                        <span className="text-slate-300 text-xs truncate">{e.name}</span>
+                                      </button>
+                                    ))}
+                                    {filteredEntries.length > 50 && (
+                                      <p className="text-xs text-slate-600 pt-1">Showing first 50 of {filteredEntries.length} matches — refine your search.</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     <button onClick={addFixed} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">+ Add fixed field</button>
+                    <p className="text-xs text-slate-600 mt-2">
+                      Use <span className="font-mono">field.subfield</span> for nested paths (e.g. <span className="font-mono">category.id = 5</span>), or a JSON object as the value (e.g. <span className="font-mono text-slate-500">{'{'}&#8202;&quot;id&quot;:5{'}'}</span>). Click 🔎 to browse objects by name and pick an ID.
+                    </p>
                     {templatePaths.some(p => p.startsWith('@')) && (
                       <p className="text-xs text-yellow-600 mt-2">
                         Tip: this endpoint needs a <code>@class</code> field. Add it as a fixed field.
@@ -856,7 +1728,7 @@ export default function FeedPage() {
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
-                  Send {rows.length} rows to API
+                  {feedProtocol === 'soap' ? `Send ${rows.length} rows via SOAP` : `Send ${rows.length} rows to API`}
                 </button>
               </div>
             )}
@@ -972,7 +1844,7 @@ export default function FeedPage() {
       </div>
 
       {/* Payload preview panel */}
-      {showPreview && endpoint && (
+      {showPreview && (endpoint || feedProtocol === 'soap') && (
         <div className="fixed inset-0 bg-black/70 z-50 flex">
           <div className="flex-1" onClick={() => setShowPreview(false)} />
           <div className="w-full max-w-3xl bg-slate-900 border-l border-slate-700 flex flex-col shadow-2xl">
@@ -980,7 +1852,10 @@ export default function FeedPage() {
               <div>
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono truncate max-w-sm">
-                  POST → {endpoint.url.replace('{{baseURL}}', config.baseUrl?.replace(/\/$/, '') || '<baseURL>')}
+                  {feedProtocol === 'soap'
+                    ? `POST → ${normalizeBaseUrl(config.baseUrl || '') || '<baseURL>'}${soapPath || '/services/UbiManager'} [SOAP: ${soapMacro || 'Assignment'}]`
+                    : `POST → ${endpoint!.url.replace('{{baseURL}}', normalizeBaseUrl(config.baseUrl || '') || '<baseURL>')}`
+                  }
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1026,7 +1901,10 @@ export default function FeedPage() {
                       </div>
                     )}
                     <pre className="text-xs text-slate-300 font-mono whitespace-pre-wrap leading-relaxed">
-                      {JSON.stringify(previewPayloads[previewIdx].payload, null, 2)}
+                      {feedProtocol === 'soap'
+                        ? buildFeedSoapEnvelope(previewPayloads[previewIdx].payload as Record<string, unknown>, soapMacro, soapParamName, soapXsiType, soapReassign)
+                        : JSON.stringify(previewPayloads[previewIdx].payload, null, 2)
+                      }
                     </pre>
                   </>
                 )}

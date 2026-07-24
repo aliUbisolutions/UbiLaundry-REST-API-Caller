@@ -5,11 +5,14 @@ import * as XLSX from 'xlsx';
 import Link from 'next/link';
 import type { ReactElement } from 'react';
 import {
-  loadEnvironments, loadConversionTables, applyConversions,
+  loadAllEnvironments, loadConversionTables, applyConversions, normalizeBaseUrl,
   type Environment, type ConversionTable, type ConversionNote,
 } from '@/lib/storage';
 import { APP_VERSION } from '@/lib/version';
 import UserBadge from '@/components/UserBadge';
+import { useAuth } from '@/components/AuthContext';
+import { postHistory } from '@/lib/history-client';
+import type { BatchRecord } from '@/lib/history-client';
 
 interface Config { baseUrl: string; username: string; password: string; }
 
@@ -99,13 +102,74 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
   return { item, reassign, returnValue };
 }
 
+// ─── SOAP helpers ─────────────────────────────────────────────────────────────
+
+function escapeXml(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildItemXml(item: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [key, val] of Object.entries(item)) {
+    if (key === '@class' || key === 'attributeLinks' || val === null || val === undefined) continue;
+    if (typeof val === 'object' && !Array.isArray(val)) {
+      const nested = val as Record<string, unknown>;
+      if (nested.id !== undefined) {
+        lines.push(`          <${key}><id>${escapeXml(nested.id)}</id></${key}>`);
+      }
+    } else if (key === 'id') {
+      lines.push(`          <id xsi:type="xsd:string">${escapeXml(val)}</id>`);
+    } else if (typeof val === 'boolean') {
+      lines.push(`          <${key}>${val}</${key}>`);
+    } else {
+      lines.push(`          <${key}>${escapeXml(val)}</${key}>`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildSoapEnvelope(item: Record<string, unknown>, reassign: boolean): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tns="http://ws.ubimanager.ubisolutions.net/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <tns:executeMacro>
+      <macro>Assignment</macro>
+      <params>
+        <params>
+          <name>item</name>
+          <value xsi:type="tns:Item">
+${buildItemXml(item)}
+          </value>
+        </params>
+        <params>
+          <name>reassign</name>
+          <value xsi:type="xsd:boolean">${reassign}</value>
+        </params>
+      </params>
+    </tns:executeMacro>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+function parseSoapFault(xml: string): string | null {
+  const m = xml.match(/<(?:[\w]+:)?faultstring[^>]*>([\s\S]*?)<\/(?:[\w]+:)?faultstring>/i);
+  if (m) return m[1].trim();
+  return /<(?:[\w]+:)?Fault[\s>]/i.test(xml) ? 'SOAP Fault (no detail)' : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const BATCH_SIZE = 50_000;
 const CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB per read
 
 // ─── CSV parser helpers ───────────────────────────────────────────────────────
 
 function detectSep(line: string): string {
-  const candidates = [',', ';', '\t'];
+  const candidates = [',', ';', '|', '\t'];
   let best = ','; let bestCount = 0;
   for (const sep of candidates) {
     let count = 0; let inQ = false;
@@ -163,12 +227,13 @@ function readBlobAsText(blob: Blob): Promise<string> {
 async function initCSV(
   file: File,
   customHeaderNames?: string[],
+  forceSep?: string,
 ): Promise<{ headers: string[]; sep: string; firstDataOffset: number }> {
   const head = await readBlobAsText(file.slice(0, Math.min(65536, file.size)));
   const clean = head.startsWith('﻿') ? head.slice(1) : head;
   const nlIdx = clean.indexOf('\n');
   const firstLine = (nlIdx >= 0 ? clean.slice(0, nlIdx) : clean).replace(/\r$/, '');
-  const sep = detectSep(firstLine);
+  const sep = (forceSep && forceSep !== 'auto') ? forceSep : detectSep(firstLine);
   if (customHeaderNames) {
     return { headers: customHeaderNames, sep, firstDataOffset: 0 };
   }
@@ -211,7 +276,7 @@ async function loadCSVBatch(
 
 // ─── Excel parser (loads all rows at once — suitable for smaller files) ───────
 
-function parseExcelFile(file: File, customHeaderNames?: string[]): Promise<Row[]> {
+function parseExcelFile(file: File, customHeaderNames?: string[], idField = 'id'): Promise<Row[]> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -229,7 +294,32 @@ function parseExcelFile(file: File, customHeaderNames?: string[]): Promise<Row[]
         } else {
           raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
         }
+        if (idField !== 'id') {
+          raw = raw.map(r => {
+            if (!(idField in r)) return r;
+            const mapped = { ...r };
+            mapped['id'] = mapped[idField];
+            delete mapped[idField];
+            return mapped;
+          });
+        }
         resolve(raw.map(r => cleanRow(r)).filter(Boolean) as Row[]);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function getExcelFirstRowHeaders(file: File): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target?.result as ArrayBuffer, { type: 'array', raw: false, cellDates: false });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '', raw: false });
+        resolve(Object.keys(rows[0] ?? {}));
       } catch (err) { reject(err); }
     };
     reader.onerror = reject;
@@ -358,12 +448,22 @@ const STATUS_ICON: Record<RowStatus, ReactElement> = {
 };
 
 export default function ImportPage() {
+  const { user } = useAuth();
+  const canUseSoap = !user || user.profile === 'admin' || user.allowedMethods.includes('SOAP');
+
   const [config] = useState<Config>(() => {
     try { return JSON.parse(localStorage.getItem('ubilaundry-config') ?? '{}'); } catch { return {}; }
   });
-  const [envs] = useState<Environment[]>(() => loadEnvironments());
+  const [envs, setEnvs] = useState<Environment[]>([]);
   const [allTables] = useState<ConversionTable[]>(() => loadConversionTables());
 
+  useEffect(() => { loadAllEnvironments().then(setEnvs); }, []);
+
+  const [csvSep, setCsvSep]             = useState<string>('auto');
+  const [pendingIdPick, setPendingIdPick] = useState<{
+    file: File; headers: string[]; useHeader: boolean; headerOverride: string;
+  } | null>(null);
+  const [pickedIdColumn, setPickedIdColumn] = useState('');
   const [csvMeta, setCsvMeta]           = useState<CSVMeta | null>(null);
   const [batchOffsets, setBatchOffsets] = useState<number[]>([]);
   const [rows, setRows]                 = useState<Row[]>([]);
@@ -379,6 +479,8 @@ export default function ImportPage() {
   const [reassign, setReassign]         = useState(true);
   const [returnValue, setReturnValue]   = useState(true);
   const [concurrency]                   = useState(3);
+  const [protocol, setProtocol]         = useState<'rest' | 'soap'>('rest');
+  const [soapPath, setSoapPath]         = useState('/services/UbiManager');
 
   const [sourceEnvId, setSourceEnvId]             = useState('');
   const [selectedTableIds, setSelectedTableIds]   = useState<Set<string>>(new Set());
@@ -402,9 +504,10 @@ export default function ImportPage() {
   const pendingRef      = useRef<Map<number, Partial<RowResult>>>(new Map());
   const allExcelRowsRef = useRef<Row[]>([]);
   const currentFileRef  = useRef<File | null>(null);
+  const idFieldNameRef  = useRef('id');
 
   const targetEnv = useMemo(() =>
-    envs.find(e => e.baseUrl.replace(/\/$/, '') === config.baseUrl?.replace(/\/$/, '')),
+    envs.find(e => normalizeBaseUrl(e.baseUrl) === normalizeBaseUrl(config.baseUrl ?? '')),
     [envs, config.baseUrl]
   );
 
@@ -423,9 +526,11 @@ export default function ImportPage() {
     [rows, reassign, returnValue, activeTables],
   );
 
-  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string) => {
+  const loadFile = useCallback(async (file: File, useHeader: boolean, headerOverride: string, idField = 'id') => {
     currentFileRef.current = file;
     setParseError('');
+    setPendingIdPick(null);
+    setPickedIdColumn('');
     setRows([]);
     setCsvMeta(null);
     setBatchOffsets([]);
@@ -447,22 +552,36 @@ export default function ImportPage() {
     try {
       const isCSV = file.name.toLowerCase().endsWith('.csv');
       if (isCSV) {
-        const { headers, sep, firstDataOffset } = await initCSV(file, customNames);
-        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, headers, sep, firstDataOffset);
+        const { headers, sep, firstDataOffset } = await initCSV(file, customNames, csvSep);
+        if (!headers.includes(idField)) {
+          setPendingIdPick({ file, headers, useHeader, headerOverride });
+          return;
+        }
+        const effectiveHeaders = idField !== 'id'
+          ? headers.map(h => h === idField ? 'id' : h)
+          : headers;
+        const { rows: batch, nextOffset, hasMore } = await loadCSVBatch(file, effectiveHeaders, sep, firstDataOffset);
         if (batch.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
           return;
         }
-        setCsvMeta({ file, headers, sep });
+        idFieldNameRef.current = idField;
+        setCsvMeta({ file, headers: effectiveHeaders, sep });
         setBatchOffsets(hasMore ? [firstDataOffset, nextOffset] : [firstDataOffset]);
         setHasMoreBatches(hasMore);
         setRows(batch);
       } else {
-        const allRows = await parseExcelFile(file, customNames);
+        const excelHeaders = customNames ?? await getExcelFirstRowHeaders(file);
+        if (!excelHeaders.includes(idField)) {
+          setPendingIdPick({ file, headers: excelHeaders, useHeader, headerOverride });
+          return;
+        }
+        const allRows = await parseExcelFile(file, customNames, idField);
         if (allRows.length === 0) {
           setParseError('No valid rows found. Make sure the file has an "id" column.');
           return;
         }
+        idFieldNameRef.current = idField;
         allExcelRowsRef.current = allRows;
         setRows(allRows.slice(0, BATCH_SIZE));
         setHasMoreBatches(allRows.length > BATCH_SIZE);
@@ -476,47 +595,58 @@ export default function ImportPage() {
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) loadFile(file, hasHeader, customHeaders);
+    if (file) { idFieldNameRef.current = 'id'; loadFile(file, hasHeader, customHeaders, 'id'); }
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files?.[0];
-    if (file) loadFile(file, hasHeader, customHeaders);
+    if (file) { idFieldNameRef.current = 'id'; loadFile(file, hasHeader, customHeaders, 'id'); }
   };
+
+  // If user loses SOAP access, reset to REST.
+  useEffect(() => {
+    if (!canUseSoap && protocol === 'soap') setProtocol('rest');
+  }, [canUseSoap, protocol]);
 
   // Re-parse immediately when hasHeader toggles (skip on initial mount)
   const mountedRef = useRef(false);
   useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
-    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders);
+    if (currentFileRef.current) loadFile(currentFileRef.current, hasHeader, customHeaders, idFieldNameRef.current);
   }, [hasHeader]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-parse (debounced) when custom header names are edited
   useEffect(() => {
     if (hasHeader || !currentFileRef.current) return;
     const timer = setTimeout(() => {
-      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders);
+      if (currentFileRef.current) loadFile(currentFileRef.current, false, customHeaders, idFieldNameRef.current);
     }, 600);
     return () => clearTimeout(timer);
   }, [customHeaders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Core sending logic — used by both single-batch and all-batches import.
-  const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]) => {
+  const sendBatch = async (targetRows: Row[], targetPayloads: PayloadResult[]): Promise<BatchRecord> => {
+    const batchStartedAt = new Date().toISOString();
+    const batchT0 = Date.now();
     setRunning(true);
     setDone(false);
     setExpandedIdx(null);
     setResults(targetRows.map(row => ({ row, status: 'pending' as RowStatus })));
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
+    const url = `${normalizeBaseUrl(config.baseUrl)}/api/assignment`;
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
     pendingRef.current.clear();
+    const finalStatus = new Array<RowStatus>(targetRows.length).fill('pending');
+    const finalElapsed: number[] = [];
     const update = (index: number, patch: Partial<RowResult>) => {
       const prev = pendingRef.current.get(index) ?? {};
       pendingRef.current.set(index, { ...prev, ...patch });
+      if (patch.status) finalStatus[index] = patch.status;
+      if (patch.elapsed != null) finalElapsed.push(patch.elapsed);
     };
     const flush = () => {
       if (pendingRef.current.size === 0) return;
@@ -536,10 +666,21 @@ export default function ImportPage() {
       if (convErrors.length > 0) { update(index, { status: 'error', message: convErrors.join('; '), payload }); return; }
       try {
         const t0 = Date.now();
+        let proxyBody: string;
+        if (protocol === 'soap') {
+          const item = (payload.item ?? {}) as Record<string, unknown>;
+          const soapXml = buildSoapEnvelope(item, reassign);
+          const soapUrl = `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`;
+          const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
+          if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+          proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
+        } else {
+          proxyBody = JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) });
+        }
         const res = await fetch('/api/proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
+          body: proxyBody,
         });
         if (res.status === 401 || res.redirected) {
           abortRef.current = true;
@@ -551,13 +692,24 @@ export default function ImportPage() {
         if (data.error) {
           update(index, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
         } else if (data.status >= 200 && data.status < 300) {
-          update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+          if (protocol === 'soap') {
+            const fault = parseSoapFault(String(data.body ?? ''));
+            if (fault) {
+              update(index, { status: 'error', httpStatus: data.status, message: fault, payload, responseBody: data.body, elapsed });
+            } else {
+              update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            }
+          } else {
+            update(index, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+          }
         } else {
           const body = data.body;
-          const msg = body && typeof body === 'object'
-            ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-            : String(body ?? '');
-          update(index, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
+          const msg = protocol === 'soap'
+            ? (parseSoapFault(String(body ?? '')) ?? String(body ?? ''))
+            : body && typeof body === 'object'
+              ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+              : String(body ?? '');
+          update(index, { status: 'error', httpStatus: data.status, message: msg, payload, responseBody: body, elapsed });
         }
       } catch (err: unknown) {
         update(index, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
@@ -570,14 +722,52 @@ export default function ImportPage() {
     flush();
     setRunning(false);
     setDone(true);
+
+    const ok = finalStatus.filter(s => s === 'ok').length;
+    const errors = finalStatus.filter(s => s === 'error').length;
+    const skipped = finalStatus.filter(s => s === 'skipped' || s === 'pending').length;
+    const avgElapsedMs = finalElapsed.length > 0
+      ? Math.round(finalElapsed.reduce((a, b) => a + b, 0) / finalElapsed.length)
+      : null;
+    return {
+      batchNum: 0, // set by caller
+      startedAt: batchStartedAt,
+      durationMs: Date.now() - batchT0,
+      total: targetRows.length,
+      ok,
+      errors,
+      skipped,
+      avgElapsedMs,
+    };
   };
+
+  const buildHistoryBase = () => ({
+    username: user?.username ?? '',
+    environment: normalizeBaseUrl(config.baseUrl ?? ''),
+    environmentName: targetEnv?.name ?? normalizeBaseUrl(config.baseUrl ?? ''),
+    protocol: protocol as 'rest' | 'soap',
+    operation: protocol === 'soap' ? 'Assignment (SOAP)' : 'POST /api/assignment',
+    sourceFile: fileName,
+  });
 
   const runImport = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (rows.length === 0) return;
     setShowPreview(false);
     abortRef.current = false;
-    await sendBatch(rows, previewPayloads);
+    const sessionStart = new Date().toISOString();
+    const stats = await sendBatch(rows, previewPayloads);
+    stats.batchNum = 1;
+    await postHistory({
+      ...buildHistoryBase(),
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: stats.total,
+      totalOk: stats.ok,
+      totalErrors: stats.errors,
+      totalSkipped: stats.skipped,
+      batches: [stats],
+    });
   };
 
   const runAllBatchesImport = async () => {
@@ -586,6 +776,8 @@ export default function ImportPage() {
     abortRef.current = false;
     setAutoMode('import');
 
+    const sessionStart = new Date().toISOString();
+    const allBatches: BatchRecord[] = [];
     let batchIdx = currentBatch;
     let batchRows = rows;
     // nextLoadOffset: byte position in CSV file where the next batch to load starts
@@ -596,7 +788,9 @@ export default function ImportPage() {
       setRows(batchRows);
       setCurrentBatch(batchIdx);
       setAutoBatchNum(batchIdx + 1);
-      await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+      const stats = await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+      stats.batchNum = allBatches.length + 1;
+      allBatches.push(stats);
 
       if (abortRef.current || !stillHasMore) break;
 
@@ -625,6 +819,16 @@ export default function ImportPage() {
     }
 
     setAutoMode(null);
+    await postHistory({
+      ...buildHistoryBase(),
+      startedAt: sessionStart,
+      endedAt: new Date().toISOString(),
+      totalRows: allBatches.reduce((s, b) => s + b.total, 0),
+      totalOk: allBatches.reduce((s, b) => s + b.ok, 0),
+      totalErrors: allBatches.reduce((s, b) => s + b.errors, 0),
+      totalSkipped: allBatches.reduce((s, b) => s + b.skipped, 0),
+      batches: allBatches,
+    });
   };
 
   const stop = () => { abortRef.current = true; };
@@ -664,10 +868,19 @@ export default function ImportPage() {
     setRows([]); setCsvMeta(null); setBatchOffsets([]); setHasMoreBatches(false);
     setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
+    setPendingIdPick(null); setPickedIdColumn('');
+    idFieldNameRef.current = 'id';
     allExcelRowsRef.current = [];
     currentFileRef.current = null;
     if (fileRef.current) fileRef.current.value = '';
   };
+
+  const confirmIdColumn = useCallback(() => {
+    if (!pendingIdPick || !pickedIdColumn) return;
+    const { file, useHeader, headerOverride } = pendingIdPick;
+    idFieldNameRef.current = pickedIdColumn;
+    loadFile(file, useHeader, headerOverride, pickedIdColumn);
+  }, [pendingIdPick, pickedIdColumn, loadFile]);
 
   const retryFailed = async () => {
     const failedIndices = results.map((r, i) => r.status === 'error' ? i : -1).filter(i => i >= 0);
@@ -680,7 +893,7 @@ export default function ImportPage() {
     setExpandedIdx(null);
     setResults(prev => prev.map((r, i) => failedIndices.includes(i) ? { ...r, status: 'pending' } : r));
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/api/assignment`;
+    const url = `${normalizeBaseUrl(config.baseUrl)}/api/assignment`;
     const reqHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
     if (config.username) reqHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
 
@@ -711,10 +924,21 @@ export default function ImportPage() {
         if (convErrors.length > 0) { update(idx, { status: 'error', message: convErrors.join('; '), payload }); continue; }
         try {
           const t0 = Date.now();
+          let proxyBody: string;
+          if (protocol === 'soap') {
+            const item = (payload.item ?? {}) as Record<string, unknown>;
+            const soapXml = buildSoapEnvelope(item, reassign);
+            const soapUrl = `${normalizeBaseUrl(config.baseUrl)}${soapPath || '/services/UbiManager'}`;
+            const soapHeaders: Record<string, string> = { 'Content-Type': 'text/xml; charset=utf-8', 'SOAPAction': '""' };
+            if (config.username) soapHeaders['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+            proxyBody = JSON.stringify({ url: soapUrl, method: 'POST', headers: soapHeaders, body: soapXml });
+          } else {
+            proxyBody = JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) });
+          }
           const res = await fetch('/api/proxy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, method: 'POST', headers: reqHeaders, body: JSON.stringify(payload) }),
+            body: proxyBody,
           });
           if (res.status === 401 || res.redirected) {
             abortRef.current = true;
@@ -726,13 +950,24 @@ export default function ImportPage() {
           if (data.error) {
             update(idx, { status: 'error', message: data.error, payload, responseBody: null, elapsed });
           } else if (data.status >= 200 && data.status < 300) {
-            update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            if (protocol === 'soap') {
+              const fault = parseSoapFault(String(data.body ?? ''));
+              if (fault) {
+                update(idx, { status: 'error', httpStatus: data.status, message: fault, payload, responseBody: data.body, elapsed });
+              } else {
+                update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+              }
+            } else {
+              update(idx, { status: 'ok', httpStatus: data.status, payload, responseBody: data.body, elapsed });
+            }
           } else {
             const body = data.body;
-            const msg = body && typeof body === 'object'
-              ? ((body as Record<string, unknown>).title ?? JSON.stringify(body))
-              : String(body ?? '');
-            update(idx, { status: 'error', httpStatus: data.status, message: String(msg), payload, responseBody: body, elapsed });
+            const msg = protocol === 'soap'
+              ? (parseSoapFault(String(body ?? '')) ?? String(body ?? ''))
+              : body && typeof body === 'object'
+                ? String((body as Record<string, unknown>).title ?? JSON.stringify(body))
+                : String(body ?? '');
+            update(idx, { status: 'error', httpStatus: data.status, message: msg, payload, responseBody: body, elapsed });
           }
         } catch (err: unknown) {
           update(idx, { status: 'error', message: err instanceof Error ? err.message : 'Unknown error', payload });
@@ -859,6 +1094,15 @@ export default function ImportPage() {
             />
             <span className="text-sm text-slate-300">First row is header</span>
           </label>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-500">CSV sep:</span>
+            {(['auto', ',', ';', '|'] as const).map(s => (
+              <button key={s} onClick={() => setCsvSep(s)}
+                className={`text-xs px-2 py-0.5 rounded font-mono border transition-colors ${csvSep === s ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}>
+                {s}
+              </button>
+            ))}
+          </div>
           {!hasHeader && (
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <label className="text-xs text-slate-400 shrink-0">Column names</label>
@@ -953,22 +1197,90 @@ export default function ImportPage() {
           {parseError && <p className="text-red-400 text-sm mt-3">{parseError}</p>}
         </div>
 
+        {/* Column picker — shown when no "id" column is detected */}
+        {pendingIdPick && (
+          <div className="bg-amber-950/40 border border-amber-700/50 rounded-lg px-5 py-4 space-y-3">
+            <p className="text-amber-300 text-sm font-medium">
+              No <span className="font-mono">&quot;id&quot;</span> column found in{' '}
+              <span className="font-mono text-white">{pendingIdPick.file.name}</span>
+            </p>
+            <p className="text-slate-400 text-sm">Select which column contains the item identifier:</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={pickedIdColumn}
+                onChange={e => setPickedIdColumn(e.target.value)}
+                className="bg-slate-800 border border-slate-600 text-white text-sm rounded px-3 py-1.5 focus:outline-none focus:border-amber-500"
+              >
+                <option value="">— choose a column —</option>
+                {pendingIdPick.headers.map(h => (
+                  <option key={h} value={h}>{h}</option>
+                ))}
+              </select>
+              <button
+                onClick={confirmIdColumn}
+                disabled={!pickedIdColumn}
+                className="px-4 py-1.5 text-sm bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg transition-colors font-medium"
+              >
+                Use as ID
+              </button>
+              <button
+                onClick={() => { setPendingIdPick(null); setPickedIdColumn(''); }}
+                className="px-3 py-1.5 text-sm text-slate-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Available columns: {pendingIdPick.headers.join(', ')}
+            </p>
+          </div>
+        )}
+
         {rows.length > 0 && (
           <>
             {/* Import options */}
             <div className="bg-slate-800 border border-slate-700 rounded-lg px-5 py-4">
               <h2 className="text-sm font-semibold text-slate-300 mb-3">Import Options</h2>
+              <div className="flex flex-wrap gap-6 mb-3">
+                <div className="flex items-center gap-4 flex-wrap">
+                  <span className="text-xs text-slate-400">Protocol</span>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="import-protocol" value="rest" checked={protocol === 'rest'} onChange={() => setProtocol('rest')} className="accent-blue-500" />
+                    <span className="text-sm text-slate-300">REST</span>
+                  </label>
+                  {canUseSoap && (
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input type="radio" name="import-protocol" value="soap" checked={protocol === 'soap'} onChange={() => setProtocol('soap')} className="accent-blue-500" />
+                      <span className="text-sm text-slate-300">SOAP</span>
+                    </label>
+                  )}
+                  {canUseSoap && protocol === 'soap' && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400">Path</span>
+                      <input
+                        type="text"
+                        value={soapPath}
+                        onChange={e => setSoapPath(e.target.value)}
+                        placeholder="/ws"
+                        className="bg-slate-900 border border-slate-600 text-white text-xs font-mono rounded px-2 py-1 w-28 focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
               <div className="flex flex-wrap gap-6">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={reassign} onChange={e => setReassign(e.target.checked)} className="accent-blue-500 w-4 h-4" />
                   <span className="text-sm text-slate-300">Reassign</span>
                   <span className="text-xs text-slate-500">(reassign if already assigned)</span>
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={returnValue} onChange={e => setReturnValue(e.target.checked)} className="accent-blue-500 w-4 h-4" />
-                  <span className="text-sm text-slate-300">Return value</span>
-                  <span className="text-xs text-slate-500">(include item in response)</span>
-                </label>
+                {protocol === 'rest' && (
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={returnValue} onChange={e => setReturnValue(e.target.checked)} className="accent-blue-500 w-4 h-4" />
+                    <span className="text-sm text-slate-300">Return value</span>
+                    <span className="text-xs text-slate-500">(include item in response)</span>
+                  </label>
+                )}
               </div>
             </div>
 
@@ -1252,7 +1564,7 @@ export default function ImportPage() {
               <div>
                 <h2 className="text-white font-semibold">Payload Preview</h2>
                 <p className="text-slate-400 text-xs mt-0.5 font-mono">
-                  POST → {config.baseUrl?.replace(/\/$/, '')}/api/assignment
+                  POST → {normalizeBaseUrl(config.baseUrl ?? '')}/api/assignment
                 </p>
               </div>
               <div className="flex items-center gap-2">

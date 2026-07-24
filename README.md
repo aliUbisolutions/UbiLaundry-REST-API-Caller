@@ -73,6 +73,20 @@ There are two user profiles:
 
 → See [User Management](#user-management--admin-users) below.
 
+#### Forgot a password?
+
+Passwords are stored as bcrypt hashes and can't be recovered, but you can reset one from the machine (or Docker volume) that holds the app's data:
+
+```bash
+npm run reset-password -- --list                       # list existing users
+npm run reset-password -- <username> <newPassword>     # reset an existing user
+npm run reset-password -- <username> <newPassword> --create-admin   # create a fresh admin
+```
+
+The script writes to the same data store the app uses (`DATA_DIR` if set — e.g. the Docker volume — otherwise `./data`). For Docker, run it inside the container so it targets the mounted volume, e.g. `docker compose exec app npm run reset-password -- --list`.
+
+If no users exist at all, you can instead delete `users.json` from the data store and reopen the app to run first-time setup again.
+
 ---
 
 ### Home — API Explorer (`/`)
@@ -185,6 +199,11 @@ The `/api/proxy` route forwards requests to the UbiLaundry server to avoid CORS 
 
 | Version | Changes |
 |---|---|
+| 1.10.11 | Bulk Data Feeder: ID lookup in column mapping — enable "→ ID" on any column-mapped field, pick entity type + environment, and column text is matched to the closest object name at send time (no match → null) |
+| 1.10.10 | Bulk Data Feeder: save and load import templates — capture endpoint, header mode, column mapping, trim settings, and fixed fields; stored in localStorage |
+| 1.10.9 | Bulk Data Feeder: fixed fields support `⏱ current datetime` (resolves to ISO string at send time); Excel sheet selector when workbook has multiple tabs |
+| 1.10.8 | Bulk Data Feeder: "First row is header" toggle — when unchecked, columns are auto-named Column 1, Column 2, … and assigned via the mapping step |
+| 1.10.7 | Bulk Data Feeder column mapping: new "← keep" option uses the template's original value as-is for every row (e.g. @class fixed to the full class name) |
 | 1.10.6 | Bulk Data Feeder: new Step 3 "Column mapping" — explicitly link each template field to a file column (by name or number), set to null, or ignore it |
 | 1.10.5 | Bulk Data Feeder: click any column pill to toggle space stripping — removes all whitespace from that column's values before sending |
 | 1.10.4 | Fix sign-out during import/feed: middleware returns 401 JSON for API routes instead of redirect + cookie-delete; import/feed pages detect session expiry and stop with a clear message |

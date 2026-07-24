@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import type { Endpoint } from '@/lib/endpoints';
+import { endpoints, type Endpoint } from '@/lib/endpoints';
 import type { Config } from './ConfigBar';
 import ResponsePanel, { type ApiResponse } from './ResponsePanel';
+import { loadPersistedBody, savePersistedBody, getStoredToken, setStoredToken } from '@/lib/secure-storage';
 
 interface Props {
   endpoint: Endpoint;
@@ -33,12 +34,26 @@ export default function EndpointPanel({ endpoint, config }: Props) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [bodyError, setBodyError] = useState('');
+  const [tokenAvailable, setTokenAvailable] = useState(false);
+
+  const tokenSourceName = endpoint.tokenSourceId
+    ? endpoints.find(e => e.id === endpoint.tokenSourceId)?.name ?? 'the token endpoint'
+    : undefined;
 
   useEffect(() => {
     setBody(endpoint.body);
     setQueryParams(endpoint.queryParams.map(p => ({ ...p, enabled: true })));
     setResponse(null);
     setBodyError('');
+    setTokenAvailable(endpoint.tokenSourceId ? !!getStoredToken(endpoint.tokenSourceId) : false);
+
+    if (endpoint.persistBodyEncrypted) {
+      let cancelled = false;
+      loadPersistedBody(endpoint.id).then(saved => {
+        if (!cancelled && saved !== null) setBody(saved);
+      });
+      return () => { cancelled = true; };
+    }
   }, [endpoint.id]);
 
   useEffect(() => {
@@ -75,17 +90,24 @@ export default function EndpointPanel({ endpoint, config }: Props) {
     }
     if (body && !validateBody(body)) return;
 
-    setLoading(true);
-    setResponse(null);
-
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
 
-    if (config.username) {
+    if (endpoint.authType === 'bearer') {
+      const stored = endpoint.tokenSourceId ? getStoredToken(endpoint.tokenSourceId) : null;
+      if (!stored) {
+        alert(`No bearer token available. Call "${tokenSourceName}" first.`);
+        return;
+      }
+      headers['Authorization'] = 'Bearer ' + stored.token;
+    } else if (endpoint.authType !== 'none' && config.username) {
       headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
     }
+
+    setLoading(true);
+    setResponse(null);
 
     try {
       const res = await fetch('/api/proxy', {
@@ -101,6 +123,16 @@ export default function EndpointPanel({ endpoint, config }: Props) {
       });
       const data = await res.json();
       setResponse(data);
+
+      if (
+        data.status >= 200 && data.status < 300 &&
+        data.body && typeof data.body === 'object' &&
+        typeof (data.body as Record<string, unknown>).token === 'string'
+      ) {
+        const tokenBody = data.body as { token: string; generationDateUTC?: string; peremptionDateUTC?: string };
+        setStoredToken(endpoint.id, tokenBody);
+        setTokenAvailable(true);
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       setResponse({ status: 0, statusText: 'Error', headers: {}, body: message, elapsed: 0 });
@@ -130,6 +162,15 @@ export default function EndpointPanel({ endpoint, config }: Props) {
           </div>
         </div>
       </div>
+
+      {/* Bearer token status */}
+      {endpoint.authType === 'bearer' && (
+        <div className={`px-5 py-2 text-xs border-b border-slate-700 ${tokenAvailable ? 'text-emerald-400 bg-emerald-400/5' : 'text-amber-400 bg-amber-400/5'}`}>
+          {tokenAvailable
+            ? `Bearer token available (from "${tokenSourceName}").`
+            : `No bearer token yet — call "${tokenSourceName}" first.`}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto">
         {/* URL Bar */}
@@ -209,7 +250,12 @@ export default function EndpointPanel({ endpoint, config }: Props) {
         {endpoint.method !== 'GET' && endpoint.method !== 'HEAD' && (
           <div className="px-5 py-4 border-b border-slate-700">
             <div className="flex items-center justify-between mb-2">
-              <label className="text-xs font-medium text-slate-400">Request Body <span className="text-slate-600">(JSON)</span></label>
+              <label className="text-xs font-medium text-slate-400">
+                Request Body <span className="text-slate-600">(JSON)</span>
+                {endpoint.persistBodyEncrypted && (
+                  <span className="text-slate-600 ml-2 normal-case font-normal">🔒 saved locally, encrypted</span>
+                )}
+              </label>
               {body && (
                 <button
                   onClick={() => { try { setBody(JSON.stringify(JSON.parse(body), null, 2)); setBodyError(''); } catch { /* skip */ } }}
@@ -222,7 +268,10 @@ export default function EndpointPanel({ endpoint, config }: Props) {
             <textarea
               value={body}
               onChange={e => { setBody(e.target.value); if (bodyError) validateBody(e.target.value); }}
-              onBlur={e => validateBody(e.target.value)}
+              onBlur={e => {
+                validateBody(e.target.value);
+                if (endpoint.persistBodyEncrypted) savePersistedBody(endpoint.id, e.target.value);
+              }}
               rows={10}
               className={`w-full bg-slate-900 border rounded px-3 py-2 font-mono text-xs text-slate-300 focus:outline-none resize-y ${bodyError ? 'border-red-500' : 'border-slate-700 focus:border-blue-500'}`}
               placeholder="Enter JSON body..."

@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    image: ubilaundry-app
     ports:
       - "3000:3000"
     restart: unless-stopped
