@@ -109,7 +109,8 @@ Upload a CSV or Excel file where each row represents an item to assign. The page
 4. Shows a **Preview Payloads** panel before sending
 5. Sends requests in parallel (3 workers) and displays only error rows after completion
 6. Offers a **Retry failed** button to re-send only the failed rows
-7. Can generate a **PostgreSQL SQL script** instead of calling the API — useful for large files
+7. After the import, runs a **post-import check** on the first and last item: it fetches `GET /api/entities/Item/{id}` for the item id each of those rows should have created and reports whether the object now exists (✓ Exists / ✗ Not found). A **Re-check** button re-runs it on demand.
+8. Can generate a **PostgreSQL SQL script** instead of calling the API — useful for large files
 
 → [Detailed documentation](docs/bulk-import.md)
 
