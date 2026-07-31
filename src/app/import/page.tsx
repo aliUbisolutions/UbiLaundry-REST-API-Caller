@@ -348,6 +348,36 @@ function computePayloads(
   });
 }
 
+// ─── Post-import verification ─────────────────────────────────────────────────
+// After an import, we confirm the first and last assignment actually took effect
+// by fetching the item entity (GET /api/entities/Item/{id}) for the item id that
+// each of those rows should have created.
+
+type VerifyStatus = 'checking' | 'exists' | 'missing' | 'error';
+interface VerifyEntry {
+  position: 'first' | 'last';
+  itemId: string;
+  status: VerifyStatus;
+  httpStatus?: number;
+  message?: string;
+}
+
+/** The item id an assignment payload targets, or null if the row carries none. */
+function payloadItemId(p: PayloadResult | undefined): string | null {
+  const item = p?.payload?.item as Record<string, unknown> | undefined;
+  const id = item?.id;
+  return id != null && String(id).trim() !== '' ? String(id) : null;
+}
+function firstPayloadItemId(payloads: PayloadResult[]): string | null {
+  for (const p of payloads) { const id = payloadItemId(p); if (id) return id; }
+  return null;
+}
+function lastPayloadItemId(payloads: PayloadResult[]): string | null {
+  for (let i = payloads.length - 1; i >= 0; i--) { const id = payloadItemId(payloads[i]); if (id) return id; }
+  return null;
+}
+
+
 const SQL_NULL = 'NULL';
 function sqlInt(v: unknown): string {
   if (v === null || v === undefined || v === '' || String(v) === 'NULL') return SQL_NULL;
@@ -495,6 +525,9 @@ export default function ImportPage() {
 
   const [autoMode, setAutoMode]       = useState<'import' | 'sql' | null>(null);
   const [autoBatchNum, setAutoBatchNum] = useState(0);
+
+  const [verifyResults, setVerifyResults] = useState<VerifyEntry[] | null>(null);
+  const [verifying, setVerifying]          = useState(false);
 
   const [hasHeader, setHasHeader]         = useState(true);
   const [customHeaders, setCustomHeaders] = useState('');
@@ -750,10 +783,52 @@ export default function ImportPage() {
     sourceFile: fileName,
   });
 
+  // Fetch the item entity for a given id and classify whether it exists.
+  const verifyItemExists = useCallback(async (itemId: string): Promise<Omit<VerifyEntry, 'position' | 'itemId'>> => {
+    const url = `${normalizeBaseUrl(config.baseUrl)}/api/entities/Item/${encodeURIComponent(itemId)}`;
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (config.username) headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
+    try {
+      const res = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, method: 'GET', headers }),
+      });
+      const data = await res.json();
+      if (data.error) return { status: 'error', message: data.error };
+      const s = data.status as number;
+      if (s === 404) return { status: 'missing', httpStatus: s };
+      if (s >= 200 && s < 300) {
+        const b = data.body;
+        const exists = Array.isArray(b)
+          ? b.length > 0
+          : (b !== null && typeof b === 'object' ? Object.keys(b).length > 0 : !!b);
+        return { status: exists ? 'exists' : 'missing', httpStatus: s };
+      }
+      return { status: 'error', httpStatus: s, message: data.statusText || `HTTP ${s}` };
+    } catch (e: unknown) {
+      return { status: 'error', message: e instanceof Error ? e.message : 'Network error' };
+    }
+  }, [config]);
+
+  // Verify the first and last imported item still exist server-side.
+  const runVerification = useCallback(async (firstId: string | null, lastId: string | null) => {
+    const entries: VerifyEntry[] = [];
+    if (firstId) entries.push({ position: 'first', itemId: firstId, status: 'checking' });
+    if (lastId && lastId !== firstId) entries.push({ position: 'last', itemId: lastId, status: 'checking' });
+    if (entries.length === 0) { setVerifyResults(null); return; }
+    setVerifyResults(entries);
+    setVerifying(true);
+    const settled = await Promise.all(entries.map(async e => ({ ...e, ...(await verifyItemExists(e.itemId)) })));
+    setVerifyResults(settled);
+    setVerifying(false);
+  }, [verifyItemExists]);
+
   const runImport = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     if (rows.length === 0) return;
     setShowPreview(false);
+    setVerifyResults(null);
     abortRef.current = false;
     const sessionStart = new Date().toISOString();
     const stats = await sendBatch(rows, previewPayloads);
@@ -768,16 +843,23 @@ export default function ImportPage() {
       totalSkipped: stats.skipped,
       batches: [stats],
     });
+    if (!abortRef.current) {
+      await runVerification(firstPayloadItemId(previewPayloads), lastPayloadItemId(previewPayloads));
+    }
   };
 
   const runAllBatchesImport = async () => {
     if (!config.baseUrl) { alert('Configure the Base URL first.'); return; }
     setShowPreview(false);
+    setVerifyResults(null);
     abortRef.current = false;
     setAutoMode('import');
 
     const sessionStart = new Date().toISOString();
     const allBatches: BatchRecord[] = [];
+    // Track the very first and very last item id across all batches for verification.
+    let firstItemId: string | null = null;
+    let lastItemId: string | null = null;
     let batchIdx = currentBatch;
     let batchRows = rows;
     // nextLoadOffset: byte position in CSV file where the next batch to load starts
@@ -788,9 +870,13 @@ export default function ImportPage() {
       setRows(batchRows);
       setCurrentBatch(batchIdx);
       setAutoBatchNum(batchIdx + 1);
-      const stats = await sendBatch(batchRows, computePayloads(batchRows, activeTables, reassign, returnValue));
+      const batchPayloads = computePayloads(batchRows, activeTables, reassign, returnValue);
+      const stats = await sendBatch(batchRows, batchPayloads);
       stats.batchNum = allBatches.length + 1;
       allBatches.push(stats);
+      if (firstItemId === null) firstItemId = firstPayloadItemId(batchPayloads);
+      const batchLast = lastPayloadItemId(batchPayloads);
+      if (batchLast) lastItemId = batchLast;
 
       if (abortRef.current || !stillHasMore) break;
 
@@ -829,6 +915,9 @@ export default function ImportPage() {
       totalSkipped: allBatches.reduce((s, b) => s + b.skipped, 0),
       batches: allBatches,
     });
+    if (!abortRef.current) {
+      await runVerification(firstItemId, lastItemId);
+    }
   };
 
   const stop = () => { abortRef.current = true; };
@@ -869,6 +958,7 @@ export default function ImportPage() {
     setCurrentBatch(0); setResults([]); setFileName(''); setParseError('');
     setDone(false); setShowPreview(false); setExpandedIdx(null);
     setPendingIdPick(null); setPickedIdColumn('');
+    setVerifyResults(null);
     idFieldNameRef.current = 'id';
     allExcelRowsRef.current = [];
     currentFileRef.current = null;
@@ -1549,6 +1639,52 @@ export default function ImportPage() {
                     <p className="text-emerald-400 text-sm font-medium">All {counts.ok ?? 0} rows imported successfully.</p>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Post-import verification — first & last item existence */}
+            {verifyResults && (
+              <div className="bg-slate-800 border border-slate-700 rounded-lg overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-300">Post-import check — first &amp; last item</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">Fetches <span className="font-mono">GET /api/entities/Item/&#123;id&#125;</span> to confirm the item was created.</p>
+                  </div>
+                  {(() => {
+                    const first = verifyResults.find(v => v.position === 'first');
+                    const last = verifyResults.find(v => v.position === 'last');
+                    return (
+                      <button
+                        onClick={() => runVerification(first?.itemId ?? null, last?.itemId ?? null)}
+                        disabled={verifying}
+                        className="text-xs text-slate-400 hover:text-white px-3 py-1 border border-slate-600 rounded disabled:opacity-50"
+                      >
+                        {verifying ? 'Checking…' : 'Re-check'}
+                      </button>
+                    );
+                  })()}
+                </div>
+                <div className="divide-y divide-slate-700/50">
+                  {verifyResults.map(v => {
+                    const badge =
+                      v.status === 'exists'   ? { cls: 'bg-emerald-400/10 text-emerald-400', label: '✓ Exists' } :
+                      v.status === 'missing'  ? { cls: 'bg-red-400/10 text-red-400',         label: '✗ Not found' } :
+                      v.status === 'checking' ? { cls: 'bg-slate-700 text-slate-400',        label: 'Checking…' } :
+                                                { cls: 'bg-yellow-400/10 text-yellow-400',    label: '⚠ Error' };
+                    return (
+                      <div key={v.position} className="px-4 py-3 flex items-center gap-3 text-sm">
+                        <span className="text-xs uppercase tracking-wide text-slate-500 w-12 shrink-0">{v.position}</span>
+                        <span className="font-mono text-slate-300 truncate flex-1" title={v.itemId}>{v.itemId}</span>
+                        {(v.httpStatus || v.message) && (
+                          <span className="text-xs text-slate-500 shrink-0">
+                            {v.httpStatus ? `HTTP ${v.httpStatus}` : ''}{v.message ? ` · ${v.message}` : ''}
+                          </span>
+                        )}
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${badge.cls}`}>{badge.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </>
