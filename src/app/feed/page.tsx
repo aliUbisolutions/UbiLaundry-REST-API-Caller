@@ -1638,11 +1638,19 @@ export default function FeedPage() {
                     <p className="text-xs text-slate-600 mt-2">
                       Use <span className="font-mono">field.subfield</span> for nested paths (e.g. <span className="font-mono">category.id = 5</span>), or a JSON object as the value (e.g. <span className="font-mono text-slate-500">{'{'}&#8202;&quot;id&quot;:5{'}'}</span>). Click 🔎 to browse objects by name and pick an ID.
                     </p>
-                    {templatePaths.some(p => p.startsWith('@')) && (
-                      <p className="text-xs text-yellow-600 mt-2">
-                        Tip: this endpoint needs a <code>@class</code> field. Add it as a fixed field.
-                      </p>
-                    )}
+                    {(() => {
+                      // The endpoint's own example body may declare a @class field nested
+                      // under a parent (e.g. "item.@class") — match on the leaf name, not
+                      // just a top-level path, or this tip never fires for nested payloads.
+                      const classPath = templatePaths.find(p => (p.split('.').pop() ?? p) === '@class');
+                      if (!classPath || fixedFields.some(f => f.key.trim() === classPath)) return null;
+                      return (
+                        <p className="text-xs text-yellow-600 mt-2">
+                          Tip: this endpoint needs a <code>@class</code> field or the server may reject the request (HTTP 500). Add a fixed field:{' '}
+                          <code className="text-yellow-500">{classPath} = {String(templateValues[classPath])}</code>
+                        </p>
+                      );
+                    })()}
                   </div>
 
                   {/* JSON preview */}
