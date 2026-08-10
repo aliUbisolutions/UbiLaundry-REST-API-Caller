@@ -46,7 +46,10 @@ function coerce(val: unknown): unknown {
   if (s.toLowerCase() === 'true') return true;
   if (s.toLowerCase() === 'false') return false;
   const n = Number(s);
-  if (!isNaN(n) && s !== '') return n;
+  // Only treat it as a number when the conversion is lossless: String(n) === s.
+  // This keeps long ids (e.g. 23-digit RFID/EPC tags, which overflow JS number
+  // precision and would become 8.42e+23) and values with leading zeros as strings.
+  if (!isNaN(n) && String(n) === s) return n;
   return s;
 }
 
