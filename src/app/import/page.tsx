@@ -45,6 +45,21 @@ function toInt(val: unknown): number | null {
   return isNaN(n) ? null : n;
 }
 
+// Convert a scalar to a number ONLY when the conversion is lossless (String(n) === s).
+// A 23-digit id overflows JS number precision and would become 8.42e+23, so it — and
+// any value with leading zeros — is kept as a string instead.
+function coerceScalar(val: unknown): string | number {
+  const s = String(val).trim();
+  const n = Number(s);
+  if (s !== '' && !isNaN(n) && String(n) === s) return n;
+  return s;
+}
+// An entity id that stays a number when it round-trips exactly, otherwise a string.
+function toEntityId(val: unknown): string | number | null {
+  if (val === null || val === undefined || val === '' || String(val) === 'NULL') return null;
+  return coerceScalar(val);
+}
+
 // Fields whose value becomes { id: N } in the item payload
 const NESTED_ID_FIELDS = new Set([
   'category', 'lastSeenLocation', 'lastSeenWorkstation', 'lastMovementType',
@@ -82,8 +97,8 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
     }
 
     if (NESTED_ID_FIELDS.has(col)) {
-      const n = toInt(val);
-      if (n !== null) item[col] = { id: n };
+      const id = toEntityId(val);
+      if (id !== null) item[col] = { id };
       continue;
     }
 
@@ -95,8 +110,7 @@ function buildPayload(row: Record<string, unknown>, reassign: boolean, returnVal
 
     // Generic: skip null / empty / NULL
     if (val === null || val === undefined || val === '' || String(val) === 'NULL') continue;
-    const n = toInt(val);
-    item[col] = n !== null ? n : String(val);
+    item[col] = coerceScalar(val);
   }
 
   return { item, reassign, returnValue };
