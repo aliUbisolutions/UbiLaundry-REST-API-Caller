@@ -606,7 +606,7 @@ export const endpoints: Endpoint[] = [
     "name": "Update item",
     "method": "PUT",
     "url": "{{baseURL}}/api/entities/Item/azerty2",
-    "body": "{\n  \"@class\": \"net.ubisolutions.ubimanager.entities.laundry.ItemLaundry\",\n  \"id\": \"azerty2\",\n  \"comment\": \"test\"\n    \"tid\" : \"E23456\"\n\n}",
+    "body": "{\n  \"@class\": \"net.ubisolutions.ubimanager.entities.laundry.ItemLaundry\",\n  \"id\": \"azerty2\",\n  \"comment\": \"test\",\n  \"tid\": \"E23456\"\n}",
     "description": "Update the item with the specified id\n\nhttps://ubilaundry.fr.ubi-manager.com/api/entities/Item/{id}",
     "queryParams": [],
     "id": "ep_53"
