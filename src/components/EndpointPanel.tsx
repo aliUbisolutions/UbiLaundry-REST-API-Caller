@@ -30,6 +30,10 @@ export default function EndpointPanel({ endpoint, config }: Props) {
   const [queryParams, setQueryParams] = useState<QueryParam[]>(() =>
     endpoint.queryParams.map(p => ({ ...p, enabled: true }))
   );
+  // The path (and any path-embedded id) after the base URL — user-editable, so a
+  // fixed example id in an endpoint's URL (e.g. /api/entities/Category/1) can be
+  // changed or removed. Resets to the endpoint's default path when switching endpoints.
+  const [path, setPath] = useState(() => endpoint.url.replace('{{baseURL}}', '').split('?')[0]);
   const [resolvedUrl, setResolvedUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ApiResponse | null>(null);
@@ -43,6 +47,7 @@ export default function EndpointPanel({ endpoint, config }: Props) {
   useEffect(() => {
     setBody(endpoint.body);
     setQueryParams(endpoint.queryParams.map(p => ({ ...p, enabled: true })));
+    setPath(endpoint.url.replace('{{baseURL}}', '').split('?')[0]);
     setResponse(null);
     setBodyError('');
     setTokenAvailable(endpoint.tokenSourceId ? !!getStoredToken(endpoint.tokenSourceId) : false);
@@ -58,18 +63,15 @@ export default function EndpointPanel({ endpoint, config }: Props) {
 
   useEffect(() => {
     const base = config.baseUrl.replace(/\/$/, '');
-    let url = endpoint.url.replace('{{baseURL}}', base);
+    let url = base + path.split('?')[0];
 
     const enabledParams = queryParams.filter(p => p.enabled && p.key);
     if (enabledParams.length > 0) {
       const qs = enabledParams.map(p => `${encodeURIComponent(p.key)}=${encodeURIComponent(p.value)}`).join('&');
-      const hasQuery = url.includes('?');
-      url = hasQuery ? url.split('?')[0] + '?' + qs : url + '?' + qs;
-    } else {
-      url = url.split('?')[0];
+      url = url + '?' + qs;
     }
     setResolvedUrl(url);
-  }, [endpoint.url, config.baseUrl, queryParams]);
+  }, [path, config.baseUrl, queryParams]);
 
   const validateBody = (val: string): boolean => {
     if (!val.trim()) return true;
@@ -175,10 +177,34 @@ export default function EndpointPanel({ endpoint, config }: Props) {
       <div className="flex-1 overflow-y-auto">
         {/* URL Bar */}
         <div className="px-5 py-4 border-b border-slate-700">
-          <label className="text-xs font-medium text-slate-400 block mb-1.5">Request URL</label>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-xs font-medium text-slate-400">Request URL</label>
+            {path !== endpoint.url.replace('{{baseURL}}', '').split('?')[0] && (
+              <button
+                onClick={() => setPath(endpoint.url.replace('{{baseURL}}', '').split('?')[0])}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                ↺ Reset path
+              </button>
+            )}
+          </div>
           <div className="flex gap-2">
-            <div className="flex-1 bg-slate-900 border border-slate-600 rounded px-3 py-2 font-mono text-xs text-slate-300 break-all min-h-[2.25rem]">
-              {resolvedUrl || <span className="text-slate-600">Configure base URL to preview</span>}
+            <div className="flex-1 flex items-center bg-slate-900 border border-slate-600 rounded px-3 min-h-[2.25rem] focus-within:border-blue-500">
+              {config.baseUrl ? (
+                <span className="text-slate-500 text-xs font-mono shrink-0 truncate max-w-[40%]" title={config.baseUrl.replace(/\/$/, '')}>
+                  {config.baseUrl.replace(/\/$/, '')}
+                </span>
+              ) : (
+                <span className="text-slate-600 text-xs shrink-0">Configure base URL</span>
+              )}
+              <input
+                type="text"
+                value={path}
+                onChange={e => setPath(e.target.value)}
+                placeholder="/path/to/resource"
+                title="Edit the path — remove or change any embedded id"
+                className="flex-1 bg-transparent text-white text-xs font-mono py-2 pl-0.5 focus:outline-none placeholder:text-slate-600 min-w-0"
+              />
             </div>
             <button
               onClick={execute}
@@ -199,6 +225,9 @@ export default function EndpointPanel({ endpoint, config }: Props) {
               {loading ? 'Sending...' : 'Send'}
             </button>
           </div>
+          {queryParams.some(p => p.enabled && p.key) && (
+            <p className="text-slate-600 text-xs font-mono mt-1.5 break-all">→ {resolvedUrl}</p>
+          )}
         </div>
 
         {/* Query Params */}
