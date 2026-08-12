@@ -39,6 +39,8 @@ export default function EndpointPanel({ endpoint, config }: Props) {
   const [response, setResponse] = useState<ApiResponse | null>(null);
   const [bodyError, setBodyError] = useState('');
   const [tokenAvailable, setTokenAvailable] = useState(false);
+  const [loadingCurrent, setLoadingCurrent] = useState(false);
+  const [loadCurrentMsg, setLoadCurrentMsg] = useState('');
 
   const tokenSourceName = endpoint.tokenSourceId
     ? endpoints.find(e => e.id === endpoint.tokenSourceId)?.name ?? 'the token endpoint'
@@ -50,6 +52,7 @@ export default function EndpointPanel({ endpoint, config }: Props) {
     setPath(endpoint.url.replace('{{baseURL}}', '').split('?')[0]);
     setResponse(null);
     setBodyError('');
+    setLoadCurrentMsg('');
     setTokenAvailable(endpoint.tokenSourceId ? !!getStoredToken(endpoint.tokenSourceId) : false);
 
     if (endpoint.persistBodyEncrypted) {
@@ -85,13 +88,7 @@ export default function EndpointPanel({ endpoint, config }: Props) {
     }
   };
 
-  const execute = async () => {
-    if (!config.baseUrl) {
-      alert('Please configure the Base URL first.');
-      return;
-    }
-    if (body && !validateBody(body)) return;
-
+  const buildAuthHeaders = (): Record<string, string> | null => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
@@ -101,12 +98,24 @@ export default function EndpointPanel({ endpoint, config }: Props) {
       const stored = endpoint.tokenSourceId ? getStoredToken(endpoint.tokenSourceId) : null;
       if (!stored) {
         alert(`No bearer token available. Call "${tokenSourceName}" first.`);
-        return;
+        return null;
       }
       headers['Authorization'] = 'Bearer ' + stored.token;
     } else if (endpoint.authType !== 'none' && config.username) {
       headers['Authorization'] = 'Basic ' + btoa(`${config.username}:${config.password}`);
     }
+    return headers;
+  };
+
+  const execute = async () => {
+    if (!config.baseUrl) {
+      alert('Please configure the Base URL first.');
+      return;
+    }
+    if (body && !validateBody(body)) return;
+
+    const headers = buildAuthHeaders();
+    if (!headers) return;
 
     setLoading(true);
     setResponse(null);
@@ -140,6 +149,59 @@ export default function EndpointPanel({ endpoint, config }: Props) {
       setResponse({ status: 0, statusText: 'Error', headers: {}, body: message, elapsed: 0 });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // PUT endpoints replace the whole object — sending a partial body wipes out every
+  // field that isn't included. Fetch the live object from the same URL first, then
+  // layer any in-progress edits on top, so the user edits real data instead of an
+  // example stub and never loses fields they didn't intend to touch.
+  const loadCurrentObject = async () => {
+    if (!config.baseUrl) {
+      alert('Please configure the Base URL first.');
+      return;
+    }
+    const headers = buildAuthHeaders();
+    if (!headers) return;
+
+    setLoadingCurrent(true);
+    setLoadCurrentMsg('');
+    try {
+      const res = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: resolvedUrl.split('?')[0],
+          method: 'GET',
+          headers,
+          endpointId: endpoint.id,
+        }),
+      });
+      const data = await res.json();
+
+      if (!(data.status >= 200 && data.status < 300) || !data.body || typeof data.body !== 'object' || Array.isArray(data.body)) {
+        setLoadCurrentMsg(`Could not load the current object (HTTP ${data.status}). Body left unchanged.`);
+        return;
+      }
+
+      let edits: Record<string, unknown> = {};
+      if (body.trim()) {
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) edits = parsed;
+        } catch {
+          // Unparseable draft — still fine to load the live object; the draft is discarded.
+        }
+      }
+
+      const merged = { ...(data.body as Record<string, unknown>), ...edits };
+      setBody(JSON.stringify(merged, null, 2));
+      setBodyError('');
+      setLoadCurrentMsg('Loaded the current object from the server. Edit only what you want to change, then Send.');
+    } catch (err: unknown) {
+      setLoadCurrentMsg(err instanceof Error ? err.message : 'Failed to load current object.');
+    } finally {
+      setLoadingCurrent(false);
     }
   };
 
@@ -285,15 +347,34 @@ export default function EndpointPanel({ endpoint, config }: Props) {
                   <span className="text-slate-600 ml-2 normal-case font-normal">🔒 saved locally, encrypted</span>
                 )}
               </label>
-              {body && (
-                <button
-                  onClick={() => { try { setBody(JSON.stringify(JSON.parse(body), null, 2)); setBodyError(''); } catch { /* skip */ } }}
-                  className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
-                >
-                  Format
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {endpoint.method === 'PUT' && (
+                  <button
+                    onClick={loadCurrentObject}
+                    disabled={loadingCurrent}
+                    className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 transition-colors"
+                  >
+                    {loadingCurrent ? 'Loading…' : '⤓ Load current object'}
+                  </button>
+                )}
+                {body && (
+                  <button
+                    onClick={() => { try { setBody(JSON.stringify(JSON.parse(body), null, 2)); setBodyError(''); } catch { /* skip */ } }}
+                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    Format
+                  </button>
+                )}
+              </div>
             </div>
+            {endpoint.method === 'PUT' && (
+              <p className="text-xs text-amber-500 mb-2">
+                ⚠ PUT replaces the whole object — any field left out here will be reset on the server. Click <span className="text-amber-400">Load current object</span> to prefill with the live data instead of typing from scratch.
+              </p>
+            )}
+            {loadCurrentMsg && (
+              <p className="text-xs text-slate-400 mb-2">{loadCurrentMsg}</p>
+            )}
             <textarea
               value={body}
               onChange={e => { setBody(e.target.value); if (bodyError) validateBody(e.target.value); }}
