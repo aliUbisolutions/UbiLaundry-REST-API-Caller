@@ -1,5 +1,5 @@
 'use client';
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 
 const AUTH_EXEMPT_PATHS = ['/login', '/setup'];
@@ -27,13 +27,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [expired, setExpired] = useState(false);
+  // Tracks whether we've had a live, authenticated session at some point in this
+  // page's lifetime. A cold load with no cookie yet (e.g. landing on /login to sign
+  // in for the first time) hits the same 401 as a session that actually went stale
+  // mid-use — only the latter should show the "expired" banner.
+  const hadSessionRef = useRef(false);
 
   function refresh() {
     fetch('/api/auth/me')
       .then(r => r.json())
       .then(d => {
+        if (d.user) {
+          hadSessionRef.current = true;
+          setExpired(false);
+        } else if (hadSessionRef.current) {
+          setExpired(!!d.error);
+        }
         setUser(d.user ?? null);
-        setExpired(!d.user && !!d.error);
       })
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
